@@ -104,6 +104,41 @@ export interface TmpCleanupPreview {
   warnings?: string[];
 }
 
+export interface CodexState {
+  status: 'unknown' | 'checking' | 'ready' | 'installing' | 'restarting' | 'error';
+  installed: boolean | null;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  installMethod: 'npm' | 'native' | 'unknown' | null;
+  executablePath: string | null;
+  canInstall: boolean;
+  unsupportedReason: string | null;
+  lastChecked: number | null;
+  lastResult: string | null;
+  error: string | null;
+  restartStatus: 'not-running' | 'restarted' | 'already-current' | 'manual' | 'failed' | null;
+  restartMessage: string | null;
+  log: string[];
+}
+
+export interface TerminalSession {
+  id: string;
+  profileId: string;
+  title: string;
+  status: 'opening' | 'running' | 'exited' | 'error';
+  exitCode: number | null;
+  error: string | null;
+  cols: number;
+  rows: number;
+}
+export interface TerminalRead {
+  data: string;
+  cursor: number;
+  startCursor: number;
+  session: TerminalSession;
+}
+
 export interface ServerState {
   profileId: string;
   status: string;
@@ -124,6 +159,7 @@ export interface ServerState {
   };
   slurm?: SlurmState;
   storage?: StorageState;
+  codex?: CodexState;
   tunnels: { id: string; status: string; error?: string; lastChecked?: number | string; healthVerified?: boolean; healthStatus?: 'pending' | 'tcp-ok' | 'probe-restricted' | 'unverified' | 'target-unavailable'; healthDetail?: string }[];
   events: { id: string; time: number | string; level: string; message: string }[];
 }
@@ -180,6 +216,15 @@ export interface LionApi {
   cancelJob(id: string, jobId: string, token: string): Promise<{ jobId: string; cancelled: true }>;
   getJobPriority(id: string, jobId: string): Promise<{ jobId: string; priority: number | null; priorities?: number[] }>;
   refreshStorage(id: string): Promise<void>;
+  refreshCodex(id: string): Promise<CodexState>;
+  installCodex(id: string): Promise<CodexState>;
+  listTerminals(profileId: string): Promise<TerminalSession[]>;
+  openTerminal(profileId: string, cols: number, rows: number): Promise<TerminalSession>;
+  readTerminal(profileId: string, id: string, cursor: number): Promise<TerminalRead>;
+  writeTerminal(profileId: string, id: string, data: string): Promise<void>;
+  resizeTerminal(profileId: string, id: string, cols: number, rows: number): Promise<void>;
+  renameTerminal(profileId: string, id: string, title: string): Promise<TerminalSession>;
+  closeTerminal(profileId: string, id: string): Promise<void>;
   prepareTmpCleanup(id: string): Promise<TmpCleanupPreview>;
   cleanupTmp(id: string, token: string): Promise<{ deletedCount: number | null; cleanupStatus: 'complete' | 'partial' | 'unknown'; warnings?: string[] }>;
   updateGpu(id: string, gpu: GpuSettings): Promise<void>;

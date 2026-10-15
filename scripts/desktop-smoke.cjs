@@ -10,6 +10,7 @@ const { chromium } = require('playwright');
 const { localSshServer, echoServer, freePort, roundTrip } = require('../tests/helpers/local-ssh.cjs');
 const { profile, tunnel, delay } = require('../tests/helpers/fixtures.cjs');
 const { mineQueue, allQueue } = require('../tests/helpers/slurm-output.cjs');
+const { probeText, verifyTerminalRendering, verifyTerminalClipboard } = require('../tests/helpers/terminal-rendering.cjs');
 
 const root = path.resolve(__dirname, '..');
 const output = path.join(root, 'test-output');
@@ -67,7 +68,7 @@ async function launch(dataDir, errors, verification) {
     assert.equal(await page.locator('#startup-shell').count(), 0);
     const invoke = (method, ...args) => page.evaluate(({ method, args }) => window.__TAURI_INTERNALS__.invoke('lion_request', { method, args }), { method, args });
     return {
-      page, invoke, child,
+      page, invoke, child, consoleErrors,
       async stop() {
         // Only this spawned test process is terminated. Rust owns its sockets
         // and tasks; live SSH is disconnected explicitly before this call.
@@ -198,7 +199,7 @@ async function main() {
   const id = 'desktop-smoke-device';
   try {
     const password = `fixture-${randomUUID()}`;
-    ssh = await localSshServer({ password, squeueResponse: command => command === 'squeue' ? allQueue : mineQueue, storageResponse: 'LION_STORAGE_V1\t1000\nHOME\t4096\t3\t2\t0\nTMP\t8192\t4\t3\t0\n' });
+    ssh = await localSshServer({ password, terminalEnabled: true, squeueResponse: command => command === 'squeue' ? allQueue : mineQueue, storageResponse: 'LION_STORAGE_V1\t1000\nHOME\t4096\t3\t2\t0\nTMP\t8192\t4\t3\t0\n' });
     echo = await echoServer();
     const localPort = await freePort();
     const remotePort = await freePort();
@@ -257,18 +258,95 @@ async function main() {
     report.gpu = { cards: state.gpu.total, idle: state.gpu.idleCount };
     report.slurm = { jobs: state.slurm.jobs.length };
     report.storage = { totalBytes: state.storage.totalBytes };
+    assert.equal(await app.page.locator('.page-header').getByRole('button', { name: '添加设备', exact: true }).count(), 0);
+    await app.page.getByTestId('tools-card').waitFor();
+    assert.equal(await app.page.getByTestId('tool-codex').count(), 1);
+    assert.equal(state.codex.status, 'unknown');
+    assert.equal(state.codex.installed, null);
+    await assert.rejects(app.invoke('refresh-codex', id, 'arbitrary command'), /只接受设备标识/);
+    assert.equal(ssh.stats.allCommands.some(command => command.includes('# Lion Codex')), false);
+    report.codexToolEntry = true;
+    report.topbarAddRemoved = true;
+    await app.page.evaluate(() => {
+      window.terminalCspViolations = [];
+      document.addEventListener('securitypolicyviolation', event => {
+        window.terminalCspViolations.push({ directive: event.effectiveDirective, blocked: event.blockedURI });
+      });
+    });
+    await app.page.getByTestId('tool-terminal').click();
+    await app.page.getByTestId('terminal-page').waitFor();
+    await app.page.waitForFunction(() => document.querySelectorAll('[data-testid="terminal-tab"]').length === 1);
+    await app.page.locator('.xterm-helper-textarea').first().focus();
+    await app.page.keyboard.type('native-terminal-input');
+    await app.page.keyboard.press('Enter');
+    const inputDeadline = Date.now() + 10_000;
+    while (!Buffer.concat(ssh.stats.terminalInputs.map(item => Buffer.from(item.data, 'base64'))).toString().includes('native-terminal-input\r')) {
+      if (Date.now() > inputDeadline) throw new Error('原生终端未将键盘输入发送到远程 PTY');
+      await delay(50);
+    }
+    await app.page.getByTestId('terminal-add').click();
+    await app.page.waitForFunction(() => document.querySelectorAll('[data-testid="terminal-tab"]').length === 2);
+    await app.page.getByTestId('terminal-tab').last().dblclick();
+    await app.page.getByTestId('terminal-title-input').fill('原生终端备注');
+    await app.page.getByTestId('terminal-title-input').press('Enter');
+    await app.page.getByTestId('terminal-tab').filter({ hasText: '原生终端备注' }).waitFor();
+    const terminalSessions = await app.invoke('terminal-list', id);
+    assert.equal(terminalSessions.length, 2);
+    assert.equal(terminalSessions.some(item => item.title === '原生终端备注'), true);
+    assert.equal(ssh.stats.terminalSessions.every(item => item.pty.term === 'xterm-256color' && item.pty.cols >= 2 && item.pty.rows >= 1), true);
+    const activeTerminal = terminalSessions.find(item => item.title === '原生终端备注');
+    await ssh.writeTerminal(ssh.stats.terminalSessions.at(-1).id, probeText);
+    report.terminalRendering = await verifyTerminalRendering(app.page, activeTerminal.id);
+    const clipboardCapability = await app.page.evaluate(() => ({ secure: isSecureContext, read: typeof navigator.clipboard?.readText === 'function', write: typeof navigator.clipboard?.writeText === 'function' }));
+    assert.deepEqual(clipboardCapability, { secure: true, read: true, write: true });
+    report.terminalClipboard = await verifyTerminalClipboard(app.page, activeTerminal.id);
+    report.terminalClipboard.nativeClipboardApiAvailable = true;
+    const clipboardDeadline = Date.now() + 10_000;
+    while (!Buffer.concat(ssh.stats.terminalInputs.filter(item => item.id === ssh.stats.terminalSessions.at(-1).id).map(item => Buffer.from(item.data, 'base64'))).toString().includes('LION_CLIPBOARD_PASTE 中文\rNEXT_LINE')) {
+      if (Date.now() > clipboardDeadline) throw new Error('原生终端右键粘贴未发送到当前远程 PTY');
+      await delay(50);
+    }
+    assert.equal(Buffer.concat(ssh.stats.terminalInputs.filter(item => item.id !== ssh.stats.terminalSessions.at(-1).id).map(item => Buffer.from(item.data, 'base64'))).toString().includes('LION_CLIPBOARD_PASTE'), false, 'Paste must not leak to another terminal');
+    report.terminalClipboard.pasteReachesSelectedPtyOnly = true;
+    await app.page.emulateMedia({ reducedMotion: 'reduce' });
+    await app.page.waitForFunction(id => {
+      const cursor = document.querySelector(`[data-testid="terminal-surface"][data-terminal-id="${id}"] .xterm-cursor`);
+      return cursor && getComputedStyle(cursor).animationName === 'none' && getComputedStyle(cursor).backgroundColor === 'rgb(180, 208, 255)';
+    }, activeTerminal.id);
+    report.terminalRendering.reducedMotionCursorVisible = true;
+    await app.page.emulateMedia({ reducedMotion: 'no-preference' });
+    await app.page.screenshot({ path: path.join(output, 'desktop-smoke-terminal.png'), animations: 'disabled' });
+    await app.page.getByTestId('terminal-back').click();
+    await app.page.getByTestId('tool-terminal').click();
+    assert.equal(await app.page.getByTestId('terminal-tab').count(), 2);
+    assert.equal((await app.invoke('terminal-list', id)).length, 2, 'Returning to the terminal page does not create a new shell');
+    await app.page.getByTestId('terminal-back').click();
+    report.terminals = { nativePty: true, keyboardInput: true, independentTabs: true, editableNotes: true, pageChangesKeepSessions: true };
     await app.invoke('set-slurm-scope', id, 'all');
     await pollState(app, id, state => state.slurm.scope === 'all' && state.slurm.jobs.length === 3, '全部 Slurm 作业');
     report.tray = await checkTrayRestore(app, dataDir, localPort, remotePort, verification);
+    assert.equal((await app.invoke('terminal-list', id)).every(item => item.status === 'running'), true);
+    assert.equal(ssh.stats.terminalSessions.every(item => !item.closed), true);
+    report.terminals.trayKeepsSessions = true;
     const screenshot = path.join(output, 'desktop-smoke-connected.png');
     await app.page.screenshot({ path: screenshot, animations: 'disabled', fullPage: true });
     report.screenshot = screenshot;
     await app.invoke('disconnect', id);
     await pollState(app, id, state => state.status === 'disconnected', '断开连接');
+    const terminalDeadline = Date.now() + 10_000;
+    while ((await app.invoke('terminal-list', id)).some(item => item.status === 'running')) {
+      if (Date.now() > terminalDeadline) throw new Error('断开 SSH 后终端未结束');
+      await delay(50);
+    }
+    assert.equal((await app.invoke('terminal-list', id)).length, 2);
+    report.terminals.disconnectedTabsRetained = true;
     await assert.rejects(roundTrip(localPort, 'after-disconnect', 1000));
     await assert.rejects(roundTrip(remotePort, 'after-disconnect', 1000));
     report.disconnectReleasesPorts = true;
     assert.deepEqual(ssh.stats.rejectedCommands, []);
+    report.securityPolicyViolations = await app.page.evaluate(() => window.terminalCspViolations);
+    assert.deepEqual(report.securityPolicyViolations, [], 'The native CSP must allow xterm dynamic styles while keeping other restrictions');
+    assert.deepEqual(app.consoleErrors, [], 'Native rendering console errors must not be ignored');
     await app.stop();
     app = null;
     report.nativeRestart = await nativeRestartSmoke(dataDir, verification);

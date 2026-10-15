@@ -1,6 +1,6 @@
 [package]
 name = "lion-ssh"
-version = "1.7.1"
+version = "1.8.2"
 description = "Lion SSH desktop application and native SSH backend"
 authors = ["Lion SSH contributors"]
 license = "Apache-2.0"
@@ -15,6 +15,8 @@ tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 tempfile = "3"
 semver = "1"

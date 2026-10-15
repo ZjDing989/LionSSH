@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import Icon from './components/Icon.vue';
 import { api as desktopApi } from './api';
-import type { GpuCard, GpuSettings, HostKeyRequest, JobCancelPreview, Profile, Secrets, ServerState, ShutdownNotice, SlurmJob, SlurmScope, ThemePreference, ThemeState, TmpCleanupPreview, Tunnel, UpdateState } from './types';
+import type { CodexState, GpuCard, GpuSettings, HostKeyRequest, JobCancelPreview, Profile, Secrets, ServerState, ShutdownNotice, SlurmJob, SlurmScope, ThemePreference, ThemeState, TmpCleanupPreview, Tunnel, UpdateState } from './types';
 
 const api = window.lion ?? desktopApi;
+const TerminalWorkspace = defineAsyncComponent(() => import('./components/TerminalWorkspace.vue'));
+const terminalVisited = ref(false);
 const preview = !api;
 const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
 const theme = ref<ThemeState>({ preference: cachedTheme(), resolved: 'light' });
@@ -19,6 +21,10 @@ applyTheme(api?.initialTheme || { preference: theme.value.preference, resolved: 
 const profiles = ref<Profile[]>([]);
 const states = reactive<Record<string, ServerState>>({});
 const selectedId = ref('');
+const page = ref<'workspace' | 'codex' | 'terminal'>('workspace');
+const codexErrors = reactive<Record<string, string>>({});
+const codexRequestIds: Record<string, number> = {};
+const codexRevisions: Record<string, number> = {};
 const version = ref('1.0.0');
 const update = ref<UpdateState | null>(null);
 let updateRevision = 0;
@@ -141,6 +147,23 @@ const tunnelDraft = reactive<Tunnel>(freshTunnel());
 const selected = computed(() => profiles.value.find(p => p.id === selectedId.value));
 const currentState = computed(() => selected.value ? getState(selected.value) : null);
 const connected = computed(() => currentState.value?.status === 'connected');
+const codex = computed(() => currentState.value?.codex);
+const codexBusy = computed(() => Boolean(selected.value && (busy[`codex:${selected.value.id}`] || ['checking', 'installing', 'restarting'].includes(codex.value?.status || ''))));
+const codexInstalling = computed(() => ['installing', 'restarting'].includes(codex.value?.status || '') || Boolean(selected.value && busy[`codexInstall:${selected.value.id}`]));
+const codexError = computed(() => selected.value ? codexErrors[selected.value.id] || codex.value?.error || '' : '');
+const codexCanInstall = computed(() => Boolean(connected.value && !codexBusy.value && !codexError.value && codex.value?.canInstall && codex.value.latestVersion && (codex.value.installed === false || codex.value.installed === true && codex.value.updateAvailable && newerVersion(codex.value.latestVersion, codex.value.currentVersion))));
+const codexActionLabel = computed(() => codex.value?.status === 'restarting' ? '正在重启' : codexInstalling.value ? codex.value?.installed === false ? '正在安装' : '正在更新' : codex.value?.installed === false ? '安装 Codex' : '更新 Codex');
+const codexStatusLabel = computed(() => {
+  if (!connected.value) return '等待连接';
+  if (codex.value?.status === 'checking' || codexBusy.value && !codexInstalling.value) return '正在检测';
+  if (codex.value?.status === 'restarting') return '正在重启';
+  if (codexInstalling.value) return codex.value?.installed === false ? '正在安装' : '正在更新';
+  if (codexError.value) return '检测或操作未完成';
+  if (codex.value?.installed === false) return '尚未安装';
+  if (codex.value?.updateAvailable && newerVersion(codex.value.latestVersion, codex.value.currentVersion)) return '有新版本';
+  if (codex.value?.currentVersion && codex.value?.latestVersion) return '已是最新版本';
+  return '等待检测';
+});
 const connectionActive = computed(() => currentState.value && !['disconnected', 'error', 'failed', 'idle'].includes(currentState.value.status));
 const onlineCount = computed(() => profiles.value.filter(p => getState(p).status === 'connected').length);
 const gpu = computed(() => currentState.value?.gpu);
@@ -197,6 +220,9 @@ const slurmJobs = computed(() => slurmLoading.value ? [] : slurm.value?.jobs || 
 const slurmPageCount = computed(() => Math.max(1, Math.ceil(slurmJobs.value.length / slurmPageSize)));
 const slurmPageRows = computed(() => slurmJobs.value.slice((slurmPage.value - 1) * slurmPageSize, slurmPage.value * slurmPageSize));
 watch([selectedId, slurmScope], () => { slurmPage.value = 1; });
+watch([page, selectedId, connected], ([view, id, isConnected]) => {
+  if (view === 'codex' && id && isConnected) void refreshCodex();
+});
 watch([() => slurm.value?.jobs.length || 0, slurmLoading], ([count, isLoading]) => {
   if (!isLoading) slurmPage.value = Math.min(slurmPage.value, Math.max(1, Math.ceil(Number(count) / slurmPageSize)));
 });
@@ -232,6 +258,72 @@ function getState(profile: Profile): ServerState {
     gpu: { status: 'unknown', availability: 'unknown', cards: [], idleCount: 0, total: 0, intervalSec: profile.gpu.intervalSec },
     tunnels: [], events: [],
   };
+}
+
+function newerVersion(latest?: string | null, current?: string | null): boolean {
+  const parse = (value?: string | null) => value?.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
+  const next = parse(latest), installed = parse(current);
+  if (!next || !installed) return false;
+  for (let index = 1; index <= 3; index += 1) {
+    if (Number(next[index]) !== Number(installed[index])) return Number(next[index]) > Number(installed[index]);
+  }
+  if (!next[4] || !installed[4]) return Boolean(installed[4] && !next[4]);
+  const left = next[4].split('.'), right = installed[4].split('.');
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    if (left[index] === undefined || right[index] === undefined) return left[index] !== undefined;
+    if (left[index] === right[index]) continue;
+    const numericLeft = /^\d+$/.test(left[index]), numericRight = /^\d+$/.test(right[index]);
+    if (numericLeft && numericRight) return Number(left[index]) > Number(right[index]);
+    if (numericLeft !== numericRight) return !numericLeft;
+    return left[index] > right[index];
+  }
+  return false;
+}
+function openCodex() {
+  page.value = 'codex';
+  window.scrollTo({ top: 0 });
+  void nextTick(() => document.querySelector<HTMLButtonElement>('[data-testid="codex-back"]')?.focus());
+}
+function backFromCodex() {
+  page.value = 'workspace';
+  void nextTick(() => document.querySelector<HTMLButtonElement>('[data-testid="tool-codex"]')?.focus());
+}
+function openTerminal() {
+  terminalVisited.value = true;
+  page.value = 'terminal';
+  window.scrollTo({ top: 0 });
+  void nextTick(() => document.querySelector<HTMLButtonElement>('[data-testid="terminal-back"]')?.focus());
+}
+function backFromTerminal() {
+  page.value = 'workspace';
+  void nextTick(() => document.querySelector<HTMLButtonElement>('[data-testid="tool-terminal"]')?.focus());
+}
+async function runCodexOperation(install: boolean) {
+  const profile = selected.value;
+  if (!profile || !connected.value || codexBusy.value || shutdown.value || install && !codexCanInstall.value) return;
+  if (!api?.refreshCodex || install && !api.installCodex) { codexErrors[profile.id] = '当前界面未连接支持小工具的桌面后台。'; return; }
+  const id = profile.id;
+  const generation = connectionGenerations[id] || 0;
+  const revision = codexRevisions[id] || 0;
+  const requestId = codexRequestIds[id] = (codexRequestIds[id] || 0) + 1;
+  delete codexErrors[id];
+  busy[`codex:${id}`] = true;
+  busy[`codexInstall:${id}`] = install;
+  try {
+    const result = await (install ? api.installCodex(id) : api.refreshCodex(id));
+    if (disposed || codexRequestIds[id] !== requestId || (connectionGenerations[id] || 0) !== generation || states[id]?.status !== 'connected') return;
+    // A live event may already contain a newer operation stage or result.
+    if ((codexRevisions[id] || 0) === revision) states[id] = { ...states[id], codex: result };
+  } catch (error) {
+    if (!disposed && codexRequestIds[id] === requestId && (connectionGenerations[id] || 0) === generation && states[id]?.status === 'connected') codexErrors[id] = cleanError(error);
+  } finally {
+    if (codexRequestIds[id] === requestId) { busy[`codex:${id}`] = false; busy[`codexInstall:${id}`] = false; }
+  }
+}
+function refreshCodex() { return runCodexOperation(false); }
+function installCodex() { return runCodexOperation(true); }
+function codexMethodLabel(method?: CodexState['installMethod']) {
+  return method === 'npm' ? 'npm 全局安装' : method === 'native' ? '官方原生安装' : method === 'unknown' ? '安装来源未识别' : '检测后显示';
 }
 function gpuAvailabilityFor(state: ServerState): NonNullable<ServerState['gpu']['availability']> {
   return state.gpu.availability || (state.gpu.cards.length > 0 ? 'available' : 'unknown');
@@ -603,6 +695,10 @@ onMounted(() => {
       initializingStates?.add(state.profileId);
       if (state.status !== 'awaiting-trust') hostRequests.value = hostRequests.value.filter(request => request.profileId !== state.profileId);
       const previous = states[state.profileId];
+      if (state.codex && JSON.stringify(previous?.codex) !== JSON.stringify(state.codex)) {
+        codexRevisions[state.profileId] = (codexRevisions[state.profileId] || 0) + 1;
+        delete codexErrors[state.profileId];
+      }
       if (previous?.status !== state.status && (previous?.status === 'connected' || state.status === 'connected')) {
         connectionGenerations[state.profileId] = (connectionGenerations[state.profileId] || 0) + 1;
         clearPriorities(state.profileId);
@@ -654,7 +750,7 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
         </button>
         <div v-if="!profiles.length && !loading" class="sidebar-empty">还没有设备<br />添加后即可管理连接</div>
       </div>
-      <button class="add-device-sidebar" @click="openDevice()"><Icon name="plus" :size="17" />添加设备</button>
+      <button class="add-device-sidebar" data-testid="add-device" @click="openDevice()"><Icon name="plus" :size="17" />添加设备</button>
       <div class="sidebar-bottom">
         <div class="theme-control" data-testid="theme-select" role="group" aria-label="界面主题"><button v-for="option in themeOptions" :key="option.value" :data-testid="`theme-${option.value}`" :class="{ active: theme.preference === option.value }" :aria-pressed="theme.preference === option.value" :title="option.title" :aria-label="option.title" :disabled="busy.theme" @click="changeTheme(option.value)"><Icon :name="option.icon" :size="13" /><span>{{ option.label }}</span></button></div>
         <div class="sidebar-footer">
@@ -670,10 +766,30 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
     </aside>
 
     <main class="workspace">
-      <header class="page-header"><div><div class="eyebrow">YOUR CONNECTIONS, AT A GLANCE</div><h1>连接工作台<span class="title-dot">.</span></h1></div><div class="header-actions"><div class="wall-clock"><Icon name="clock" :size="15" />{{ timeText(now) }}</div><button data-testid="add-device" class="button secondary" @click="openDevice()"><Icon name="plus" :size="17" />添加设备</button></div></header>
+      <header v-if="page === 'workspace'" class="page-header"><div><div class="eyebrow">YOUR CONNECTIONS, AT A GLANCE</div><h1>连接工作台<span class="title-dot">.</span></h1></div><div class="header-actions"><div class="wall-clock"><Icon name="clock" :size="15" />{{ timeText(now) }}</div></div></header>
       <div v-if="preview" class="preview-banner"><Icon name="info" :size="17" /><span>浏览器界面预览 · 此处未连接服务器，连接操作请使用桌面应用。</span></div>
 
-      <template v-if="selected && currentState">
+      <TerminalWorkspace v-if="terminalVisited" v-show="page === 'terminal'" :visible="page === 'terminal'" :api="api" :profile-id="selectedId" :profiles="profiles" :states="states" :disabled="Boolean(shutdown)" @back="backFromTerminal" @connect="selected && requestConnection(selected)" />
+
+      <section v-if="page === 'codex'" class="codex-page" data-testid="codex-page">
+        <div class="tool-page-toolbar"><button class="button secondary small" data-testid="codex-back" @click="backFromCodex"><Icon name="back" :size="16" />返回工作台</button><span>小工具 / Codex</span></div>
+        <header class="page-header codex-page-header"><h1>更新 Codex<span class="title-dot">.</span></h1></header>
+        <template v-if="selected && currentState">
+          <section class="codex-summary card" :aria-busy="codexBusy">
+            <div class="codex-heading"><div class="codex-app-icon"><Icon name="chatgpt" :size="29" /></div><div class="codex-heading-text"><h2>Codex CLI</h2><span data-testid="codex-server">{{ selected.name }}<small>{{ selected.username }}@{{ selected.host }}:{{ selected.port }}</small></span></div><span class="status-badge" :class="!connected ? 'neutral' : codexError ? 'negative' : codexBusy ? 'pending' : codex?.updateAvailable ? 'pending' : codex?.installed ? 'positive' : 'neutral'" data-testid="codex-status" role="status"><i class="status-dot" :class="!connected ? 'neutral' : codexError ? 'negative' : codexBusy || codex?.updateAvailable ? 'pending' : codex?.installed ? 'positive' : 'neutral'" />{{ codexStatusLabel }}</span></div>
+            <div class="codex-versions"><div><span>服务器上的版本</span><strong data-testid="codex-current-version">{{ codex?.currentVersion || (codex?.installed === false ? '未安装' : '尚未检测') }}</strong><small>{{ codexMethodLabel(codex?.installMethod) }}</small></div><span class="codex-version-arrow" aria-hidden="true"><Icon name="arrow" :size="23" /></span><div><span>最新稳定版</span><strong data-testid="codex-latest-version">{{ codex?.latestVersion || '尚未检测' }}</strong><small>OpenAI 官方发布</small></div></div>
+            <div v-if="codex?.executablePath" class="codex-executable"><Icon name="folder" :size="14" /><span :title="codex.executablePath">{{ codex.executablePath }}</span></div>
+            <div v-if="!connected" class="codex-note" data-testid="codex-connection-note" role="status"><Icon name="info" :size="17" /><div><strong>连接服务器后即可检测和更新</strong><p>{{ codex?.lastChecked ? '当前显示上次检测结果。' : '安装状态尚未确认。' }}</p></div><button v-if="!connectionActive" class="button secondary small" data-testid="codex-connect" :disabled="busy[`connect:${selected.id}`]" @click="requestConnection(selected)"><Icon name="link" :size="14" />连接设备</button><span v-else>{{ statusLabel(currentState.status) }}</span></div>
+            <div v-if="codexError" class="codex-note error" data-testid="codex-error" role="alert"><Icon name="alert" :size="17" /><div><strong>操作未完成</strong><p>{{ codexError }}</p></div></div>
+            <div v-if="codex?.unsupportedReason" class="codex-note" data-testid="codex-unsupported"><Icon name="info" :size="17" /><p>{{ codex.unsupportedReason }}</p></div>
+            <div class="codex-actions"><span>{{ codex?.lastChecked ? `检测于 ${timeText(codex.lastChecked, true)}` : '进入页面后自动检测版本' }}</span><div><button class="button secondary" data-testid="codex-refresh" :disabled="!connected || codexBusy" @click="refreshCodex"><Icon name="refresh" :size="16" :class="{ spinning: codexBusy && !codexInstalling }" />{{ codexBusy && !codexInstalling ? '正在检测' : '检查版本' }}</button><button class="button primary" data-testid="codex-install" :disabled="!codexCanInstall" @click="installCodex"><Icon :name="codexInstalling ? 'refresh' : 'download'" :size="16" :class="{ spinning: codexInstalling }" />{{ codexActionLabel }}</button></div></div>
+          </section>
+          <section v-if="codex?.lastResult || codex?.restartMessage || codex?.log?.length" class="codex-result card" data-testid="codex-result"><div class="section-heading"><div class="heading-label"><span class="section-icon blue"><Icon name="activity" :size="19" /></span><h2>{{ codexInstalling ? '操作进度' : '操作结果' }}</h2></div><Icon v-if="codexInstalling" name="refresh" :size="16" class="spinning" /></div><div class="codex-result-body"><p v-if="codex.lastResult">{{ codex.lastResult }}</p><div v-if="codex.restartMessage" class="codex-restart" :class="{ warning: ['manual', 'failed'].includes(codex.restartStatus || '') }" data-testid="codex-restart"><Icon :name="codex.restartStatus === 'restarted' ? 'check' : 'info'" :size="16" /><span>{{ codex.restartMessage }}</span></div><ol v-if="codex.log?.length" class="codex-log" data-testid="codex-log"><li v-for="(line, index) in codex.log" :key="index">{{ line }}</li></ol></div></section>
+        </template>
+        <section v-else class="codex-no-server card"><Icon name="server" :size="28" /><h2>先选择一台服务器</h2><p>从左侧选择设备，或添加你的第一台设备。</p><button class="button secondary" @click="openDevice()"><Icon name="plus" :size="15" />添加设备</button></section>
+      </section>
+
+      <template v-if="page === 'workspace' && selected && currentState">
         <section class="device-card card">
           <div class="device-identity"><div class="device-avatar"><Icon name="server" :size="27" /></div><div class="device-title"><div class="device-title-line"><h2>{{ selected.name }}</h2><span class="status-badge" :class="statusClass(currentState.status)"><i class="status-dot" :class="statusClass(currentState.status)" />{{ statusLabel(currentState.status) }}</span></div><div class="device-address">{{ selected.username }}@{{ selected.host }}<span>:{{ selected.port }}</span><span class="divider">/</span><Icon :name="selected.authType === 'key' ? 'key' : 'lock'" :size="13" />{{ selected.authType === 'key' ? '密钥认证' : '密码认证' }}</div></div></div>
           <div class="device-actions"><button class="icon-button" data-testid="edit-device" title="编辑设备" aria-label="编辑设备" @click="openDevice(selected)"><Icon name="edit" :size="18" /></button><button class="icon-button danger-hover" title="移除设备" aria-label="移除设备" @click="deleting = { kind: 'device', id: selected.id, name: selected.name }"><Icon name="trash" :size="18" /></button><span class="action-divider" /><button v-if="connectionActive" class="button secondary disconnect-button" :disabled="busy[`disconnect:${selected.id}`] || currentState.status === 'disconnecting'" @click="disconnect(selected)"><Icon name="power" :size="16" />{{ currentState.status === 'disconnecting' ? '正在关闭' : '断开连接' }}</button><button v-else data-testid="connect-button" class="button primary" :disabled="busy[`connect:${selected.id}`]" @click="requestConnection(selected)"><Icon name="link" :size="17" />连接设备</button></div>
@@ -743,9 +859,11 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
           <div class="tunnel-footer"><Icon name="shield" :size="14" /><span>异常时先关闭旧转发，再恢复连接。远端端口未释放时会自动等待重试。</span></div>
         </section>
 
+        <section class="tools-card card" data-testid="tools-card"><div class="section-heading"><div class="heading-label"><span class="section-icon blue"><Icon name="tools" :size="19" /></span><h2>小工具</h2></div><span class="tools-caption">{{ selected.name }}</span></div><div class="tools-grid"><button class="tool-entry" data-testid="tool-codex" @click="openCodex"><span class="tool-entry-icon"><Icon name="chatgpt" :size="26" /></span><span class="tool-entry-text"><strong>更新 Codex</strong><small>查看版本、安装与更新</small></span><Icon name="chevron" :size="16" /></button><button class="tool-entry" data-testid="tool-terminal" @click="openTerminal"><span class="tool-entry-icon"><Icon name="terminal" :size="26" /></span><span class="tool-entry-text"><strong>终端</strong><small>连接服务器、保留多个会话</small></span><Icon name="chevron" :size="16" /></button></div></section>
+
         <section class="events-card card"><div class="section-heading"><div class="heading-label"><span class="section-icon gray"><Icon name="activity" :size="19" /></span><h2>系统日志</h2><span class="light-tag">{{ selected.name }}</span></div></div><div v-if="recentEvents.length" class="event-list" role="log" aria-label="系统日志"><div v-for="event in recentEvents" :key="event.id" class="event-line"><time>{{ timeText(event.time) }}</time><span class="event-level" :class="['error', 'warn', 'warning'].includes(event.level) ? event.level === 'error' ? 'negative' : 'pending' : 'positive'"><Icon :name="event.level === 'error' ? 'alert' : ['warn', 'warning'].includes(event.level) ? 'info' : 'check'" :size="13" /></span><span>{{ event.message }}</span></div></div><div v-else class="event-empty"><i class="status-dot neutral" />暂无事件，连接设备后将在这里记录状态变化。</div></section>
       </template>
-      <section v-else class="welcome-empty card"><div class="welcome-icon"><Icon name="server" :size="40" /></div><span class="eyebrow">A QUIET PLACE FOR YOUR SERVERS</span><h2>从你的第一台设备开始</h2><p>安全连接多台服务器，管理隧道，随时了解空闲算力。</p><button class="button primary" @click="openDevice()"><Icon name="plus" :size="17" />添加设备</button><div class="welcome-features"><span><Icon name="shield" :size="16" />密码与密钥认证</span><span><Icon name="exchange" :size="16" />双向隧道与自动恢复</span><span><Icon name="chip" :size="16" />定时监测显卡</span></div></section>
+      <section v-else-if="page === 'workspace'" class="welcome-empty card"><div class="welcome-icon"><Icon name="server" :size="40" /></div><span class="eyebrow">A QUIET PLACE FOR YOUR SERVERS</span><h2>从你的第一台设备开始</h2><p>安全连接多台服务器，管理隧道，随时了解空闲算力。</p><button class="button primary" @click="openDevice()"><Icon name="plus" :size="17" />添加设备</button><div class="welcome-features"><span><Icon name="shield" :size="16" />密码与密钥认证</span><span><Icon name="exchange" :size="16" />双向隧道与自动恢复</span><span><Icon name="chip" :size="16" />定时监测显卡</span></div></section>
       <footer class="workspace-footer"><span>Lion SSH</span></footer>
     </main>
   </div>

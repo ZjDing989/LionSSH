@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod codex;
 mod crypto;
 mod model;
 mod monitor;
 mod service;
 mod ssh;
 mod store;
+mod terminal;
 mod updater;
 mod verification;
 
@@ -95,8 +97,7 @@ async fn lion_request(
                         app.restart();
                     }
                     Err(error) => {
-                        state.finished.store(false, Ordering::SeqCst);
-                        state.quitting.store(false, Ordering::SeqCst);
+                        state.resume_after_failed_update();
                         Err(error)
                     }
                 }
@@ -208,6 +209,9 @@ fn main() {
             let window = WebviewWindowBuilder::from_config(app, config)?
                 .data_directory(data_dir.join("webview"))
                 .disable_drag_drop_handler()
+                .initialization_script(
+                    "document.addEventListener('contextmenu', (event) => event.preventDefault(), { capture: true });",
+                )
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .on_navigation(|url| {
                     url.scheme() == "tauri"
@@ -217,6 +221,18 @@ fn main() {
                             && url.port() == Some(1420))
                 })
                 .build()?;
+            #[cfg(windows)]
+            window.with_webview(|webview| unsafe {
+                // Also suppress WebView2's native menus, including before the app mounts.
+                let result = webview
+                    .controller()
+                    .CoreWebView2()
+                    .and_then(|core| core.Settings())
+                    .and_then(|settings| settings.SetAreDefaultContextMenusEnabled(false));
+                if let Err(error) = result {
+                    eprintln!("无法关闭 WebView2 默认右键菜单: {error}");
+                }
+            })?;
             let resolved = match window.theme() {
                 Ok(tauri::Theme::Dark) => "dark",
                 _ => "light",

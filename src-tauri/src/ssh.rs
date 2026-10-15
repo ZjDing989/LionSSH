@@ -1,8 +1,8 @@
 //! Native SSH transport, command channels, and supervised TCP forwarding.
 //!
-//! Each connection owns an independently cancellable socket. No terminal or
-//! arbitrary-command IPC is exposed: the monitoring module supplies its own
-//! allowlisted commands through `Executor`.
+//! Each connection owns an independently cancellable socket. Monitoring uses
+//! allowlisted commands through `Executor`; the terminal tool opens separate
+//! PTY shell channels on this same authenticated SSH transport.
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -22,7 +22,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
@@ -514,6 +514,7 @@ pub struct Connection {
     handle: Arc<client::Handle<Handler>>,
     shared: Arc<Shared>,
     lifecycle: AsyncMutex<()>,
+    terminal_opens: Arc<Semaphore>,
 }
 
 impl Connection {
@@ -701,6 +702,7 @@ impl Connection {
             handle: Arc::new(handle),
             shared,
             lifecycle: AsyncMutex::new(()),
+            terminal_opens: Arc::new(Semaphore::new(16)),
         });
         guard.0 = None;
         for config in configs {
@@ -744,6 +746,45 @@ impl Connection {
     pub async fn closed(&self) -> String {
         self.shared.closed.cancelled().await;
         self.shared.reason("SSH 连接中断")
+    }
+
+    /// Keep late confirmations alive long enough to close them explicitly.
+    /// Both per-transport and global permits bound these pending opens even
+    /// if a server never acknowledges a channel request.
+    pub async fn open_terminal_channel(
+        &self,
+        cancelled: &CancellationToken,
+        global_permit: OwnedSemaphorePermit,
+    ) -> Result<Channel<client::Msg>, String> {
+        if self.is_closed() {
+            return Err("SSH 连接已关闭".into());
+        }
+        let permit = self
+            .terminal_opens
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "终端通道仍在建立，请稍后重试")?;
+        let handle = self.handle.clone();
+        let closed = self.shared.closed.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _permits = (permit, global_permit);
+            let result = tokio::select! {
+                _ = closed.cancelled() => return,
+                result = handle.channel_open_session() => result,
+            };
+            if let Err(Ok(channel)) = sender.send(result) {
+                let _ = timeout(Duration::from_secs(1), channel.close()).await;
+            }
+        });
+        tokio::select! {
+            _ = cancelled.cancelled() => Err("终端已关闭".into()),
+            _ = self.shared.closed.cancelled() => Err("SSH 连接已关闭".into()),
+            result = timeout(CHANNEL_TIMEOUT, receiver) => result
+                .map_err(|_| "终端通道建立超时")?
+                .map_err(|_| "SSH 连接已关闭")?
+                .map_err(|error| format!("终端通道建立失败：{error}")),
+        }
     }
 
     pub fn tunnel_states(&self) -> Vec<Value> {

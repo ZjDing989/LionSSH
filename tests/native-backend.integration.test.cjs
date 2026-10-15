@@ -353,3 +353,26 @@ test('forwarding-only diagnostics disable all remote execution channels', integr
   const input = profile(ssh, { autoReconnect: false }); await connect(backend, input);
   await delay(350); assert.deepEqual(ssh.stats.allCommands, []);
 });
+
+test('Codex RPC stays profile-scoped and connecting never starts a remote installation', integration, async t => {
+  const { backend, ssh } = await fixture(t);
+  const input = profile(ssh, { autoReconnect: false });
+  await backend.invoke('save-profile', input);
+  for (const method of ['refresh-codex', 'install-codex']) {
+    await assert.rejects(backend.invoke(method, input.id), /请先连接设备/);
+    await assert.rejects(backend.invoke(method, input.id, 'curl arbitrary-command'), /只接受设备标识/);
+  }
+  assert.equal(ssh.stats.allCommands.some(command => command.includes('# Lion Codex')), false);
+  await connect(backend, input);
+  const state = await monitors(backend, input.id);
+  assert.equal(state.codex.status, 'unknown');
+  assert.equal(state.codex.installed, null);
+  for (const method of ['refresh-codex', 'install-codex']) {
+    await assert.rejects(backend.invoke(method, input.id, 'curl arbitrary-command'), /只接受设备标识/);
+  }
+  assert.equal(ssh.stats.allCommands.some(command => command.includes('# Lion Codex')), false);
+  await backend.invoke('disconnect', input.id);
+  await assert.rejects(backend.invoke('install-codex', input.id), /请先连接设备/);
+  assert.equal(ssh.stats.allCommands.some(command => command.includes('# Lion Codex')), false);
+  assert.deepEqual(ssh.stats.rejectedCommands, []);
+});

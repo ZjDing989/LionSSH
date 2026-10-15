@@ -95,7 +95,8 @@ async function localSshServer(options = {}) {
   const sockets = new Set();
   const listeners = new Map();
   const deliveryTimers = new Set();
-  const stats = { connections: 0, authenticated: 0, authenticationMethods: [], commands: [], slurmCommands: [], jobCommands: [], storageCommands: [], allCommands: [], requests: [], rejectedCommands: [], deniedStructuredQueries: [], lifecycle: [], reverseDeliveries: [] };
+  const terminalStreams = new Map();
+  const stats = { connections: 0, authenticated: 0, authenticationMethods: [], commands: [], slurmCommands: [], jobCommands: [], storageCommands: [], allCommands: [], requests: [], rejectedCommands: [], deniedStructuredQueries: [], lifecycle: [], reverseDeliveries: [], terminalSessions: [], terminalInputs: [], terminalResizes: [] };
   let password = options.password || 'test-password';
   const keyDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'lion-ssh-test-'));
   const keyPath = path.join(keyDirectory, 'id_test_rsa');
@@ -176,7 +177,40 @@ async function localSshServer(options = {}) {
       stats.authenticated++;
       client.on('session', (accept) => {
         const session = accept();
-        session.on('shell', (_accept, reject) => reject());
+        let terminal;
+        session.on('pty', (acceptPty, reject, info) => {
+          if (!options.terminalEnabled || options.terminalRejectPty) return reject?.();
+          terminal = { id: stats.terminalSessions.length + 1, pty: info, closed: false };
+          stats.terminalSessions.push(terminal);
+          stats.lifecycle.push({ type: 'terminal-pty', id: terminal.id, ...info });
+          acceptPty?.();
+        });
+        session.on('window-change', (acceptResize, reject, info) => {
+          if (!options.terminalEnabled || !terminal) return reject?.();
+          stats.terminalResizes.push({ id: terminal.id, ...info });
+          acceptResize?.();
+        });
+        session.on('shell', (acceptShell, reject) => {
+          // Interactive access must be opted in by an individual terminal test.
+          // Monitor/job/storage fixtures continue rejecting arbitrary shells.
+          if (!options.terminalEnabled || !terminal || options.terminalRejectShell) return reject();
+          const stream = acceptShell();
+          terminalStreams.set(terminal.id, stream);
+          stats.lifecycle.push({ type: 'terminal-shell-open', id: terminal.id });
+          stream.on('error', () => {});
+          stream.on('close', () => {
+            terminal.closed = true;
+            terminalStreams.delete(terminal.id);
+            stats.lifecycle.push({ type: 'terminal-shell-close', id: terminal.id });
+          });
+          stream.on('data', data => {
+            stats.terminalInputs.push({ id: terminal.id, data: data.toString('base64') });
+            const response = typeof options.terminalOnInput === 'function' ? options.terminalOnInput(data, terminal, stats) : data;
+            if (response != null) stream.write(response);
+          });
+          const greeting = typeof options.terminalGreeting === 'function' ? options.terminalGreeting(terminal) : options.terminalGreeting;
+          stream.write(greeting ?? `\x1b[32mfixture-${terminal.id}\x1b[0m 中文 🦁\r\n$ `);
+        });
         session.on('exec', (acceptExec, reject, info) => {
           stats.allCommands.push(info.command);
           if (info.command.startsWith('# Lion ')) {
@@ -324,7 +358,18 @@ async function localSshServer(options = {}) {
   });
   const port = await listen(server);
   return {
-    port, keyPath, fingerprint: hostKeys.fingerprint, stats, listeners,
+    port, keyPath, fingerprint: hostKeys.fingerprint, stats, listeners, terminalStreams,
+    writeTerminal(id, value) {
+      const stream = terminalStreams.get(id);
+      if (!stream || stream.destroyed) throw new Error(`No live fixture terminal ${id}`);
+      return new Promise((resolve, reject) => stream.write(value, error => error ? reject(error) : resolve()));
+    },
+    exitTerminal(id, code = 0) {
+      const stream = terminalStreams.get(id);
+      if (!stream || stream.destroyed) throw new Error(`No live fixture terminal ${id}`);
+      stream.exit(code);
+      stream.end();
+    },
     setNvidiaResponse(value) { nvidiaResponse = value; },
     setSqueueResponse(value) { squeueResponse = value; },
     setJobResponse(value) { jobResponse = value; },

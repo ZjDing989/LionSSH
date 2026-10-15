@@ -7,7 +7,19 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
-const NOTES = 'Windows：安装版 EXE，或解压多文件便携 ZIP 后运行 Lion SSH.exe。macOS：按 Apple Silicon / Intel 选择 DMG。Linux：AppImage。升级前请备份 data 目录。';
+const DEFAULT_NOTES = 'Lion SSH 新版本。';
+
+async function releaseNotes(version, project = root) {
+  if (!VERSION.test(version)) throw new Error('Invalid release version');
+  try {
+    const notes = (await fs.readFile(path.join(project, '.github', 'release-notes', `v${version}.md`), 'utf8')).trim();
+    if (!notes) throw new Error('Release notes must not be empty');
+    return notes;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return DEFAULT_NOTES;
+  }
+}
 
 function releaseArtifacts(version) {
   if (!VERSION.test(version)) throw new Error('Invalid release version');
@@ -55,14 +67,16 @@ async function validate(project = root, tag = process.env.RELEASE_TAG, requireSi
 
 async function prepareRelease({ github, context, core }) {
   const info = await validate();
+  const notes = await releaseNotes(info.version);
   let release;
   try {
     release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag: info.tag })).data;
     if (!release.draft) throw new Error('This tag already has a published release; create a new version instead');
+    release = (await github.rest.repos.updateRelease({ ...context.repo, release_id: release.id, body: notes })).data;
   } catch (error) {
     if (error.status !== 404) throw error;
     release = (await github.rest.repos.createRelease({ ...context.repo, tag_name: info.tag, target_commitish: context.sha,
-      name: `Lion SSH ${info.tag}`, body: NOTES, draft: true, prerelease: info.prerelease })).data;
+      name: `Lion SSH ${info.tag}`, body: notes, draft: true, prerelease: info.prerelease })).data;
   }
   core.setOutput('release_id', String(release.id));
   core.setOutput('tag', info.tag);
@@ -70,7 +84,7 @@ async function prepareRelease({ github, context, core }) {
   return release.id;
 }
 
-async function makeUpdaterJson({ version, tag, repository, assets, readSignature, notes = NOTES, publishedAt = new Date().toISOString(), serverUrl = 'https://github.com' }) {
+async function makeUpdaterJson({ version, tag, repository, assets, readSignature, notes = DEFAULT_NOTES, publishedAt = new Date().toISOString(), serverUrl = 'https://github.com' }) {
   if (!VERSION.test(version) || tag !== `v${version}`) throw new Error('Release version/tag mismatch');
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Invalid GitHub repository');
   const server = new URL(serverUrl);
@@ -99,13 +113,14 @@ async function makeUpdaterJson({ version, tag, repository, assets, readSignature
 
 async function finalizeRelease({ github, context, core }) {
   const { version, tag } = await validate();
+  const notes = await releaseNotes(version);
   const releaseId = Number(process.env.RELEASE_ID);
   if (!Number.isSafeInteger(releaseId) || releaseId <= 0) throw new Error('Invalid release ID');
   const release = (await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId })).data;
   if (!release.draft || release.tag_name !== tag) throw new Error('Only this version draft release may be finalized');
   const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...context.repo, release_id: releaseId, per_page: 100 });
   const metadata = await makeUpdaterJson({ version, tag, repository: `${context.repo.owner}/${context.repo.repo}`, assets,
-    notes: release.body || NOTES, serverUrl: context.serverUrl || 'https://github.com', readSignature: async asset => {
+    notes, serverUrl: context.serverUrl || 'https://github.com', readSignature: async asset => {
       const response = await github.rest.repos.getReleaseAsset({ ...context.repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' } });
       return typeof response.data === 'string' ? response.data : Buffer.from(response.data).toString('utf8');
     } });
@@ -114,7 +129,7 @@ async function finalizeRelease({ github, context, core }) {
   if (existing) await github.rest.repos.deleteReleaseAsset({ ...context.repo, asset_id: existing.id });
   await github.rest.repos.uploadReleaseAsset({ ...context.repo, release_id: releaseId, url: release.upload_url,
     name: 'latest.json', data: bytes, headers: { 'content-type': 'application/json', 'content-length': bytes.length } });
-  await github.rest.repos.updateRelease({ ...context.repo, release_id: releaseId, draft: false, make_latest: version.includes('-') ? 'false' : 'true' });
+  await github.rest.repos.updateRelease({ ...context.repo, release_id: releaseId, body: notes, draft: false, make_latest: version.includes('-') ? 'false' : 'true' });
   core.info(`Published ${tag} with ${Object.keys(metadata.platforms).length} signed updater targets`);
   return metadata;
 }
@@ -145,4 +160,4 @@ if (require.main === module) {
     console.log(`Validated release ${info.tag}; signing key is configured`);
   }).catch(error => { console.error(error.message); process.exitCode = 1; });
 }
-module.exports = { releaseArtifacts, requiredAssets, signatureVersion, validate, prepareRelease, makeUpdaterJson, finalizeRelease, uploadWindowsPortable };
+module.exports = { releaseNotes, releaseArtifacts, requiredAssets, signatureVersion, validate, prepareRelease, makeUpdaterJson, finalizeRelease, uploadWindowsPortable };

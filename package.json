@@ -1,6 +1,6 @@
 {
   "name": "lion-ssh",
-  "version": "1.7.1",
+  "version": "1.8.2",
   "description": "基于 Tauri 的多设备 SSH、隧道与显卡监测工作台",
   "author": "Lion SSH contributors",
   "private": true,
@@ -13,7 +13,7 @@
     "prepare:licenses": "node scripts/licenses.cjs",
     "tauri": "node scripts/tauri.cjs",
     "test": "node scripts/test.cjs",
-    "test:ui": "npm run build:frontend && node scripts/slurm-ui-smoke.cjs && node scripts/ui-actions-smoke.cjs",
+    "test:ui": "npm run build:frontend && node scripts/slurm-ui-smoke.cjs && node scripts/ui-actions-smoke.cjs && node scripts/codex-ui-smoke.cjs && node scripts/terminal-ui-smoke.cjs",
     "smoke": "node scripts/desktop-smoke.cjs",
     "smoke:data": "node scripts/data-directory-smoke.cjs",
     "pack": "node scripts/package.cjs --portable-only",
@@ -22,6 +22,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.4",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
     "vue": "^3.5.22"
   },
   "devDependencies": {
@@ -35,6 +37,11 @@
     "vue-tsc": "^3.1.1"
   },
   "license": "Apache-2.0",
-  "engines": { "node": ">=22.12.0" },
-  "repository": { "type": "git", "url": "https://github.com/ZjDing989/LionSSH.git" }
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZjDing989/LionSSH.git"
+  }
 }

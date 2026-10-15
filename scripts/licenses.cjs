@@ -186,6 +186,7 @@ function generate(options = {}) {
     '',
     'Dependency source archives are available from the package links below.',
     'The Lion SSH application license is distributed separately as LICENSE.txt.',
+    'The ChatGPT icon source and license are in ChatGPT-logo-LICENSE.txt.',
     '',
   ];
   for (const entry of entries) {
@@ -228,6 +229,7 @@ function generate(options = {}) {
     [NOTICE_FILE, `${lines.join('\n')}\n`],
     [TEXT_FILE, `${fullTexts.join('\n')}\n`],
     [MANIFEST_FILE, `${JSON.stringify(manifest, null, 2)}\n`],
+    ['ChatGPT-logo-LICENSE.txt', readText(path.join(root, 'assets', 'chatgpt-logo-LICENSE.txt'))],
   ]);
   if (options.check) {
     for (const [name, content] of outputs) {

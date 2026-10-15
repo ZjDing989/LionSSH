@@ -1,8 +1,10 @@
 use crate::{
+    codex::CodexTool,
     model,
     monitor::Monitor,
     ssh::{self, Connection, HostDecision},
     store::Store,
+    terminal::TerminalManager,
 };
 use serde_json::{json, Value};
 use std::{
@@ -31,6 +33,15 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "refresh-gpu",
     "refresh-slurm",
     "refresh-storage",
+    "refresh-codex",
+    "install-codex",
+    "terminal-list",
+    "terminal-open",
+    "terminal-read",
+    "terminal-write",
+    "terminal-resize",
+    "terminal-rename",
+    "terminal-close",
     "prepare-job-cancel",
     "cancel-job",
     "get-job-priority",
@@ -138,6 +149,8 @@ struct Device {
     trust: Mutex<Option<ssh::TrustSender>>,
     connection: Mutex<Option<Arc<Connection>>>,
     monitor: Mutex<Option<Arc<Monitor>>>,
+    codex: Mutex<Option<Arc<CodexTool>>>,
+    codex_generation: Mutex<u64>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -149,6 +162,7 @@ pub struct Service {
     secrets: Mutex<HashMap<String, Value>>,
     host_keys: Mutex<HashMap<String, Value>>,
     operations: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    terminals: TerminalManager,
     theme: Mutex<String>,
     theme_preference: Mutex<Option<String>>,
     sink: Sink,
@@ -228,6 +242,7 @@ impl Service {
             secrets: Mutex::new(HashMap::new()),
             host_keys: Mutex::new(HashMap::new()),
             operations: Mutex::new(HashMap::new()),
+            terminals: TerminalManager::new(),
             theme: Mutex::new(resolved.into()),
             theme_preference: Mutex::new(None),
             sink,
@@ -282,6 +297,11 @@ impl Service {
                     state[kind]["status"] = json!("unknown");
                     state[kind]["nextPollAt"] = Value::Null;
                 }
+                // Keep the previous read-only result visible as a dated
+                // snapshot; a new connection must probe before any action.
+                state["codex"]["status"] = json!("unknown");
+                state["codex"]["canInstall"] = json!(false);
+                state["codex"]["updateAvailable"] = json!(false);
             }
         });
     }
@@ -302,7 +322,7 @@ impl Service {
             return;
         }
         match event {
-            "gpu" | "slurm" | "storage" => self.update_state(&device.id, |state| {
+            "gpu" | "slurm" | "storage" | "codex" => self.update_state(&device.id, |state| {
                 state[event] = payload;
             }),
             "event" => self.event(
@@ -359,6 +379,19 @@ impl Service {
         })
     }
 
+    fn codex_sink_for(self: &Arc<Self>, device: &Arc<Device>, generation: u64) -> Sink {
+        let owner = Arc::downgrade(self);
+        let device = Arc::downgrade(device);
+        Arc::new(move |event, payload| {
+            if let (Some(owner), Some(device)) = (owner.upgrade(), device.upgrade()) {
+                let current_generation = device.codex_generation.lock().unwrap();
+                if *current_generation == generation {
+                    owner.receive(&device, event, payload);
+                }
+            }
+        })
+    }
+
     async fn run_device(self: Arc<Self>, device: Arc<Device>) {
         let mut attempt = 0u32;
         while self.current(&device) && !device.cancel.is_cancelled() {
@@ -391,6 +424,23 @@ impl Service {
                         break;
                     }
                     *device.connection.lock().unwrap() = Some(connection.clone());
+                    let generation = {
+                        let mut generation = device.codex_generation.lock().unwrap();
+                        *generation += 1;
+                        *generation
+                    };
+                    let previous = self
+                        .states
+                        .lock()
+                        .unwrap()
+                        .get(&device.id)
+                        .map(|state| state["codex"].clone())
+                        .unwrap_or_else(crate::codex::blank_state);
+                    *device.codex.lock().unwrap() = Some(CodexTool::new(
+                        connection.clone(),
+                        self.codex_sink_for(&device, generation),
+                        previous,
+                    ));
                     *device.trust.lock().unwrap() = None;
                     self.status(&device.id, "connected", None);
                     self.event(&device.id, "success", "SSH 连接已建立");
@@ -420,6 +470,10 @@ impl Service {
                     *device.monitor.lock().unwrap() = Some(monitor.clone());
                     monitor.start();
                     let reason = tokio::select! { _ = device.cancel.cancelled() => "连接已关闭".to_string(), reason = connection.closed() => reason };
+                    *device.codex_generation.lock().unwrap() += 1;
+                    if let Some(codex) = device.codex.lock().unwrap().take() {
+                        codex.stop();
+                    }
                     monitor.stop().await;
                     connection.close().await;
                     device.monitor.lock().unwrap().take();
@@ -470,6 +524,10 @@ impl Service {
         if let Some(device) = device {
             device.desired.store(false, Ordering::SeqCst);
             device.cancel.cancel();
+            *device.codex_generation.lock().unwrap() += 1;
+            if let Some(codex) = device.codex.lock().unwrap().take() {
+                codex.stop();
+            }
             device.trust.lock().unwrap().take();
             let task = device.task.lock().unwrap().take();
             if let Some(mut task) = task {
@@ -690,9 +748,107 @@ impl Service {
         }
         let id = string_argument(&args, 0, "设备标识")?.to_string();
         let profile = self.profile(&id).await?;
+        if method.starts_with("terminal-") {
+            let expected = match method {
+                "terminal-list" => 1,
+                "terminal-open" | "terminal-read" | "terminal-write" | "terminal-rename" => 3,
+                "terminal-resize" => 4,
+                "terminal-close" => 2,
+                _ => return Err("不支持的终端操作".into()),
+            };
+            if args.len() != expected {
+                return Err("终端操作参数格式不正确".into());
+            }
+            let dimension = |index| {
+                argument(&args, index, "终端尺寸")?
+                    .as_u64()
+                    .and_then(|number| u32::try_from(number).ok())
+                    .ok_or_else(|| "终端尺寸格式不正确".to_string())
+            };
+            if method == "terminal-list" {
+                return serde_json::to_value(self.terminals.list(&id)).map_err(|e| e.to_string());
+            }
+            if method == "terminal-open" {
+                let cols = dimension(1)?;
+                let rows = dimension(2)?;
+                let lock = self
+                    .operations
+                    .lock()
+                    .unwrap()
+                    .entry(id.clone())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                    .clone();
+                let _operation = lock.lock().await;
+                if self.quitting.load(Ordering::SeqCst) {
+                    return Err("应用正在关闭".into());
+                }
+                self.profile(&id).await?;
+                let device = self.connected(&id)?;
+                let connection = device
+                    .connection
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or("请先连接设备")?;
+                return serde_json::to_value(
+                    self.terminals.open(&id, connection, cols, rows).await?,
+                )
+                .map_err(|e| e.to_string());
+            }
+            let terminal_id = string_argument(&args, 1, "终端标识")?;
+            return match method {
+                "terminal-read" => {
+                    let cursor = argument(&args, 2, "读取位置")?
+                        .as_u64()
+                        .ok_or("终端读取位置格式不正确")?;
+                    serde_json::to_value(self.terminals.read(&id, terminal_id, cursor)?)
+                        .map_err(|e| e.to_string())
+                }
+                "terminal-write" => {
+                    self.terminals
+                        .write(&id, terminal_id, string_argument(&args, 2, "终端输入")?)
+                        .await?;
+                    Ok(Value::Null)
+                }
+                "terminal-resize" => {
+                    self.terminals
+                        .resize(&id, terminal_id, dimension(2)?, dimension(3)?)
+                        .await?;
+                    Ok(Value::Null)
+                }
+                "terminal-rename" => serde_json::to_value(self.terminals.rename(
+                    &id,
+                    terminal_id,
+                    string_argument(&args, 2, "终端备注")?,
+                )?)
+                .map_err(|e| e.to_string()),
+                "terminal-close" => {
+                    self.terminals.close(&id, terminal_id).await?;
+                    Ok(Value::Null)
+                }
+                _ => Err("不支持的终端操作".into()),
+            };
+        }
         // Read-only queries and confirmations may execute while one another is
         // awaiting a remote response; lifecycle/config changes are serialized.
         match method {
+            "refresh-codex" | "install-codex" => {
+                if args.len() != 1 {
+                    return Err("Codex 操作只接受设备标识".into());
+                }
+                let device = self.connected(&id)?;
+                let codex = device
+                    .codex
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or("Codex 工具尚未就绪，请稍后重试")?;
+                return if method == "refresh-codex" {
+                    codex.refresh().await
+                } else {
+                    codex.install().await
+                };
+            }
             "refresh-gpu"
             | "refresh-slurm"
             | "refresh-storage"
@@ -804,6 +960,8 @@ impl Service {
                     trust: Mutex::new(None),
                     connection: Mutex::new(None),
                     monitor: Mutex::new(None),
+                    codex: Mutex::new(None),
+                    codex_generation: Mutex::new(0),
                     task: Mutex::new(None),
                 });
                 self.devices
@@ -820,6 +978,7 @@ impl Service {
             "disconnect" => self.disconnect(&id).await?,
             "delete-profile" => {
                 self.disconnect(&id).await?;
+                self.terminals.remove_profile(&id).await;
                 self.store.lock().await.as_mut().unwrap().remove(&id)?;
                 self.secrets.lock().unwrap().remove(&id);
                 self.states.lock().unwrap().remove(&id);
@@ -903,7 +1062,7 @@ impl Service {
         let mut state = model::blank_state(profile);
         if !reset {
             if let Some(previous) = self.states.lock().unwrap().get(id).cloned() {
-                for key in ["events", "gpu", "slurm", "storage"] {
+                for key in ["events", "gpu", "slurm", "storage", "codex"] {
                     state[key] = previous[key].clone();
                 }
                 state["gpu"]["intervalSec"] = profile["gpu"]["intervalSec"].clone();
@@ -914,6 +1073,7 @@ impl Service {
     }
     pub async fn shutdown(&self) {
         self.quitting.store(true, Ordering::SeqCst);
+        self.terminals.shutdown().await;
         (self.sink)(
             "lion:shutdown",
             json!({"phase":"closing","message":"正在关闭隧道和服务器连接…"}),
@@ -925,14 +1085,24 @@ impl Service {
         self.secrets.lock().unwrap().clear();
     }
     pub fn kill(&self) {
+        self.terminals.kill();
         for (_, device) in self.devices.lock().unwrap().drain() {
             device.desired.store(false, Ordering::SeqCst);
             device.cancel.cancel();
+            *device.codex_generation.lock().unwrap() += 1;
+            if let Some(codex) = device.codex.lock().unwrap().take() {
+                codex.stop();
+            }
             if let Some(task) = device.task.lock().unwrap().take() {
                 task.abort();
             }
         }
         self.secrets.lock().unwrap().clear();
+    }
+    pub fn resume_after_failed_update(&self) {
+        self.terminals.resume();
+        self.finished.store(false, Ordering::SeqCst);
+        self.quitting.store(false, Ordering::SeqCst);
     }
     pub fn quit(self: &Arc<Self>, app: &AppHandle) {
         self.quit_with_code(app, 0);
@@ -974,6 +1144,77 @@ pub fn apply_theme(app: &AppHandle, theme: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn codex_results_from_old_connections_cannot_overwrite_reconnected_or_removed_devices() {
+        let temporary = tempfile::tempdir().unwrap();
+        let service = Service::open(temporary.path().to_path_buf(), "light", Arc::new(|_, _| {}));
+        let profile = json!({"id":"codex-fixture","username":"fixture","gpu":{},"tunnels":[]});
+        service
+            .states
+            .lock()
+            .unwrap()
+            .insert("codex-fixture".into(), model::blank_state(&profile));
+        let device = Arc::new(Device {
+            id: "codex-fixture".into(),
+            profile: Mutex::new(profile),
+            secrets: Mutex::new(json!({})),
+            desired: AtomicBool::new(true),
+            cancel: CancellationToken::new(),
+            trust: Mutex::new(None),
+            connection: Mutex::new(None),
+            monitor: Mutex::new(None),
+            codex: Mutex::new(None),
+            codex_generation: Mutex::new(1),
+            task: Mutex::new(None),
+        });
+        service
+            .devices
+            .lock()
+            .unwrap()
+            .insert(device.id.clone(), device.clone());
+        let old = service.codex_sink_for(&device, 1);
+        old(
+            "codex",
+            json!({"status":"installing","currentVersion":"0.2.0","canInstall":true,"updateAvailable":true}),
+        );
+        assert_eq!(
+            service.states.lock().unwrap()[&device.id]["codex"]["status"],
+            "installing"
+        );
+        *device.codex_generation.lock().unwrap() = 2;
+        service.status(&device.id, "reconnecting", None);
+        old(
+            "codex",
+            json!({"status":"ready","currentVersion":"unexpected-old-response"}),
+        );
+        assert_eq!(
+            service.states.lock().unwrap()[&device.id]["codex"]["currentVersion"],
+            "0.2.0"
+        );
+        assert_eq!(
+            service.states.lock().unwrap()[&device.id]["codex"]["status"],
+            "unknown"
+        );
+        assert_eq!(
+            service.states.lock().unwrap()[&device.id]["codex"]["canInstall"],
+            false
+        );
+        let new = service.codex_sink_for(&device, 2);
+        new("codex", json!({"status":"ready","currentVersion":"0.3.0"}));
+        assert_eq!(
+            service.states.lock().unwrap()[&device.id]["codex"]["currentVersion"],
+            "0.3.0"
+        );
+        service.devices.lock().unwrap().remove(&device.id);
+        new(
+            "codex",
+            json!({"status":"ready","currentVersion":"unexpected-removed-response"}),
+        );
+        assert_eq!(
+            service.states.lock().unwrap()[&device.id]["codex"]["currentVersion"],
+            "0.3.0"
+        );
+    }
     #[test]
     fn windows_data_defaults_keep_existing_development_and_portable_layouts() {
         let manifest = Path::new("workspace/src-tauri");

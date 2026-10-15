@@ -133,6 +133,22 @@ test('release preflight requires one version/tag and an updater public key befor
   } finally { await fs.rm(fixture, { recursive: true, force: true }); }
 });
 
+test('terminal runtime styles are permitted without disabling script CSP protection', async () => {
+  const config = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'src-tauri', 'tauri.conf.json'), 'utf8'));
+  const security = config.app.security;
+  assert.deepEqual(security.dangerousDisableAssetCspModification, ['style-src'], 'Only styles may opt out of automatic CSP nonce/hash modification');
+  for (const policy of [security.csp, security.devCsp]) {
+    const directives = new Map(policy.split(';').filter(item => item.trim()).map(item => {
+      const [name, ...sources] = item.trim().split(/\s+/);
+      return [name, sources];
+    }));
+    assert.ok(directives.get('style-src').includes("'unsafe-inline'"), 'xterm generates its theme, dimensions and cursor CSS at runtime');
+    assert.deepEqual(directives.get('script-src'), ["'self'"], 'Script execution stays restricted to bundled assets and Tauri-injected hashes');
+    assert.deepEqual(directives.get('object-src'), ["'none'"]);
+    assert.deepEqual(directives.get('frame-src'), ["'none'"]);
+  }
+});
+
 test('custom NSIS default keeps the user-selectable directory page and existing install location', async () => {
   const template = await fs.readFile(path.join(__dirname, '..', 'src-tauri', 'windows', 'installer.nsi'), 'utf8');
   assert.ok(template.includes('tauri-cli-v2.12.3/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi'));

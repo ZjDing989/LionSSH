@@ -182,7 +182,7 @@ pub fn blank_state(profile: &Value) -> Value {
             "nextPollAt": null, "intervalSec": 30, "error": null, "availabilityReason": null },
         "storage": { "status": "unknown", "homePath": home_path, "homeBytes": null, "tmpBytes": null, "totalBytes": null,
             "lastUpdated": null, "nextPollAt": null, "intervalSec": 300, "error": null, "warnings": [], "partial": false },
-        "tunnels": tunnels, "events": []
+        "tunnels": tunnels, "events": [], "codex": crate::codex::blank_state()
     })
 }
 
