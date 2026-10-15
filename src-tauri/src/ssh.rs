@@ -48,6 +48,46 @@ pub trait Executor: Send + Sync {
         timeout: Duration,
         max_output: usize,
     ) -> Result<CommandOutput, String>;
+
+    /// Run a command with a bounded local file as its standard input. This is
+    /// intentionally transport-only; callers must validate their payload first.
+    async fn exec_with_input(
+        &self,
+        _command: &str,
+        _timeout: Duration,
+        _max_output: usize,
+        _input: tokio::fs::File,
+        _input_size: u64,
+    ) -> Result<CommandOutput, String> {
+        Err("当前 SSH 执行器不支持文件输入".into())
+    }
+}
+
+/// Unlike dropping a russh channel, dropping this guard explicitly sends CLOSE.
+/// It also covers a caller dropping/aborting the command future during upload.
+struct InputChannelGuard {
+    writer: Arc<russh::ChannelWriteHalf<client::Msg>>,
+    armed: bool,
+}
+
+impl InputChannelGuard {
+    async fn close(&mut self) {
+        let _ = timeout(Duration::from_secs(1), self.writer.close()).await;
+        self.armed = false;
+    }
+}
+
+impl Drop for InputChannelGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let writer = self.writer.clone();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = timeout(Duration::from_secs(1), writer.close()).await;
+                });
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1023,6 +1063,164 @@ impl Executor for Connection {
         let _ = timeout(Duration::from_secs(1), channel.close()).await;
         result
     }
+
+    async fn exec_with_input(
+        &self,
+        command: &str,
+        duration: Duration,
+        max_output: usize,
+        mut input: tokio::fs::File,
+        input_size: u64,
+    ) -> Result<CommandOutput, String> {
+        if self.is_closed() {
+            return Err("SSH 未连接".into());
+        }
+        let deadline = tokio::time::Instant::now() + duration;
+        let metadata = tokio::select! {
+            _ = self.shared.closed.cancelled() => return Err("SSH 连接已关闭".into()),
+            result = tokio::time::timeout_at(deadline, input.metadata()) => {
+                result.map_err(|_| "读取上传文件超时")?.map_err(|e| format!("读取上传文件失败：{e}"))?
+            }
+        };
+        if !metadata.is_file() || metadata.len() != input_size {
+            return Err("上传文件长度与预期不符".into());
+        }
+        let handle = self.handle.clone();
+        let (opened, received) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = handle.channel_open_session().await;
+            // Cover a confirmation arriving after the calling future timed out
+            // or was dropped, just as with commands without standard input.
+            if let Err(Ok(channel)) = opened.send(result) {
+                let _ = channel.close().await;
+            }
+        });
+        let channel = tokio::select! {
+            _ = self.shared.closed.cancelled() => return Err("SSH 连接已关闭".into()),
+            result = tokio::time::timeout_at(deadline, received) => result.map_err(|_| "SSH 通道建立超时")?.map_err(|_| "SSH 连接已关闭")?.map_err(|e| e.to_string())?,
+        };
+        let (mut reader, writer) = channel.split();
+        let writer = Arc::new(writer);
+        let mut guard = InputChannelGuard {
+            writer: writer.clone(),
+            armed: true,
+        };
+        let input_complete = AtomicBool::new(false);
+        let operation = async {
+            writer
+                .exec(true, command)
+                .await
+                .map_err(|e| e.to_string())?;
+            let upload = async {
+                let mut remaining = input_size;
+                let mut buffer = vec![0u8; 64 * 1024];
+                while remaining > 0 {
+                    let limit = remaining.min(buffer.len() as u64) as usize;
+                    let count = input
+                        .read(&mut buffer[..limit])
+                        .await
+                        .map_err(|e| format!("读取上传文件失败：{e}"))?;
+                    if count == 0 {
+                        return Err("上传文件在传输过程中缩短".into());
+                    }
+                    writer
+                        .data(&buffer[..count])
+                        .await
+                        .map_err(|e| format!("上传文件失败：{e}"))?;
+                    remaining -= count as u64;
+                }
+                // Re-check EOF even after validating metadata: a file may have
+                // changed, or a caller may have supplied a non-zero cursor.
+                if input
+                    .read(&mut buffer[..1])
+                    .await
+                    .map_err(|e| format!("读取上传文件失败：{e}"))?
+                    != 0
+                {
+                    return Err("上传文件在传输过程中变长".into());
+                }
+                writer.eof().await.map_err(|e| e.to_string())?;
+                input_complete.store(true, Ordering::Release);
+                Ok::<(), String>(())
+            };
+            let output = async {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let mut exit_code = None;
+                while let Some(message) = reader.wait().await {
+                    match message {
+                        ChannelMsg::Data { data } => {
+                            if stdout.len().saturating_add(data.len()) > max_output {
+                                return Err("远程指令输出超过限制".into());
+                            }
+                            stdout.extend_from_slice(&data);
+                        }
+                        ChannelMsg::ExtendedData { data, .. } => {
+                            stderr.extend_from_slice(&data);
+                            if stderr.len() > 8192 {
+                                stderr.drain(..stderr.len() - 8192);
+                            }
+                        }
+                        ChannelMsg::ExitStatus { exit_status } => {
+                            if !input_complete.load(Ordering::Acquire) {
+                                let detail = String::from_utf8_lossy(&stderr)
+                                    .chars()
+                                    .rev()
+                                    .take(2000)
+                                    .collect::<String>()
+                                    .chars()
+                                    .rev()
+                                    .collect::<String>();
+                                return Err(format!("文件传输完成前远程指令已退出（退出码 {exit_status}）：{detail}"));
+                            }
+                            exit_code = Some(exit_status);
+                        }
+                        ChannelMsg::ExitSignal { .. } => {
+                            if !input_complete.load(Ordering::Acquire) {
+                                return Err("文件传输完成前远程指令被信号终止".into());
+                            }
+                            if exit_code.is_none() {
+                                exit_code = Some(255);
+                            }
+                        }
+                        ChannelMsg::Failure => return Err("服务器拒绝远程指令".into()),
+                        ChannelMsg::Eof if !input_complete.load(Ordering::Acquire) => {
+                            return Err("文件传输完成前远程通道已结束输出".into());
+                        }
+                        ChannelMsg::Close => break,
+                        _ => {}
+                    }
+                }
+                if !input_complete.load(Ordering::Acquire) {
+                    return Err("文件传输完成前远程通道已关闭".into());
+                }
+                if self.is_closed() {
+                    return Err("SSH 连接已关闭".into());
+                }
+                Ok(CommandOutput {
+                    stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&stderr)
+                        .chars()
+                        .rev()
+                        .take(2000)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect(),
+                    exit_code,
+                })
+            };
+            // Drain output while sending input. Either peer can otherwise fill
+            // its SSH channel window and deadlock on a sufficiently large file.
+            tokio::try_join!(upload, output).map(|(_, output)| output)
+        };
+        let result = tokio::select! {
+            _ = self.shared.closed.cancelled() => Err("SSH 连接已关闭".into()),
+            result = tokio::time::timeout_at(deadline, operation) => result.unwrap_or_else(|_| Err("远程指令执行超时".into())),
+        };
+        guard.close().await;
+        result
+    }
 }
 
 async fn stop_tunnel(shared: &Arc<Shared>, tunnel: &Arc<Tunnel>) {
@@ -1520,6 +1718,314 @@ mod tests {
     use super::*;
     use russh::keys::ssh_key::private::{Ed25519Keypair, KeypairData};
     use russh::server;
+
+    #[derive(Default)]
+    struct InputFixtureState {
+        opened: AtomicU64,
+        closed: AtomicU64,
+        eof: AtomicU64,
+        active: Mutex<HashSet<russh::ChannelId>>,
+    }
+
+    struct InputFixtureSession {
+        observed: Arc<InputFixtureState>,
+        inputs: HashMap<russh::ChannelId, (Vec<u8>, Sha256, u64)>,
+    }
+
+    impl server::Handler for InputFixtureSession {
+        type Error = russh::Error;
+
+        async fn auth_password(
+            &mut self,
+            user: &str,
+            password: &str,
+        ) -> Result<server::Auth, Self::Error> {
+            Ok(if user == "fixture" && password == "fixture-password" {
+                server::Auth::Accept
+            } else {
+                server::Auth::reject()
+            })
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.observed.active.lock().unwrap().insert(channel.id());
+            self.observed.opened.fetch_add(1, Ordering::Release);
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            command: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            session.channel_success(channel)?;
+            self.inputs
+                .insert(channel, (command.to_vec(), Sha256::new(), 0));
+            if command == b"input-early-error" {
+                session.extended_data(channel, 1, b"fixture-receive-failed".to_vec())?;
+                session.exit_status_request(channel, 69)?;
+                session.eof(channel)?;
+            } else if command == b"input-early-eof" {
+                session.eof(channel)?;
+            }
+            if command == b"input-duplex" || command == b"input-overflow" {
+                // More than the client's default 2 MiB receive window;
+                // sending must continue while the client uploads its file.
+                session.data(channel, vec![b'x'; 3 * 1024 * 1024])?;
+            }
+            Ok(())
+        }
+
+        async fn data(
+            &mut self,
+            channel: russh::ChannelId,
+            data: &[u8],
+            _session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            if let Some((_, hash, count)) = self.inputs.get_mut(&channel) {
+                hash.update(data);
+                *count += data.len() as u64;
+            }
+            Ok(())
+        }
+
+        async fn channel_eof(
+            &mut self,
+            channel: russh::ChannelId,
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.observed.eof.fetch_add(1, Ordering::Release);
+            if let Some((command, hash, count)) = self.inputs.remove(&channel) {
+                if command == b"input-hang" || command == b"input-overflow" {
+                    return Ok(());
+                }
+                let handle = session.handle();
+                tokio::spawn(async move {
+                    let reply = format!("\n{count}:{:x}", hash.finalize());
+                    let _ = handle.data(channel, reply.into_bytes()).await;
+                    let mut stderr = vec![b'z'; 10_000];
+                    stderr.extend_from_slice("测试".as_bytes());
+                    let _ = handle.extended_data(channel, 1, stderr).await;
+                    let _ = handle.exit_status_request(channel, 0).await;
+                    let _ = handle.eof(channel).await;
+                    let _ = handle.close(channel).await;
+                });
+            }
+            Ok(())
+        }
+
+        async fn channel_close(
+            &mut self,
+            channel: russh::ChannelId,
+            _session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.inputs.remove(&channel);
+            self.observed.active.lock().unwrap().remove(&channel);
+            self.observed.closed.fetch_add(1, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    async fn input_fixture() -> (Arc<Connection>, Arc<InputFixtureState>, CancellationToken) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let key = russh::keys::PrivateKey::new(
+            KeypairData::Ed25519(Ed25519Keypair::from_seed(&[48u8; 32])),
+            "input-fixture",
+        )
+        .unwrap();
+        let fingerprint = key.public_key().fingerprint(HashAlg::Sha256).to_string();
+        let config = Arc::new(server::Config {
+            keys: vec![key],
+            // Force hundreds of receive-window updates during the upload.
+            window_size: 8192,
+            maximum_packet_size: 4096,
+            auth_rejection_time: Duration::from_millis(1),
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            ..Default::default()
+        });
+        let observed = Arc::new(InputFixtureState::default());
+        let state = observed.clone();
+        let token = CancellationToken::new();
+        let cancelled = token.clone();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let fixture = InputFixtureSession {
+                observed: state,
+                inputs: HashMap::new(),
+            };
+            if let Ok(session) =
+                server::run_stream(config, CancelIo::new(socket, cancelled.clone()), fixture).await
+            {
+                tokio::select! { _ = cancelled.cancelled() => {}, _ = session => {} }
+            }
+        });
+        let connection = fixture_connection(port, fingerprint, vec![]).await;
+        (connection, observed, token)
+    }
+
+    async fn input_file(bytes: &[u8]) -> (tempfile::NamedTempFile, tokio::fs::File) {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(file.path(), bytes).await.unwrap();
+        let input = tokio::fs::File::open(file.path()).await.unwrap();
+        (file, input)
+    }
+
+    async fn wait_input_channels_closed(state: &InputFixtureState) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if state.active.lock().unwrap().is_empty() {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_exec_input_streams_binary_beyond_windows_and_sends_eof() {
+        let (connection, observed, server) = input_fixture().await;
+        let data: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
+        let (_file, input) = input_file(&data).await;
+        let expected = format!("\n{}:{:x}", data.len(), Sha256::digest(&data));
+        let output = connection
+            .exec_with_input(
+                "input-duplex",
+                Duration::from_secs(20),
+                4 * 1024 * 1024,
+                input,
+                data.len() as u64,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.stdout.len(), 3 * 1024 * 1024 + expected.len());
+        assert!(output.stdout.ends_with(&expected));
+        assert_eq!(output.stderr.chars().count(), 2000);
+        assert!(output.stderr.ends_with("测试"));
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(observed.eof.load(Ordering::Acquire), 1);
+        connection.close().await;
+        server.cancel();
+    }
+
+    #[tokio::test]
+    async fn loopback_exec_input_checks_size_before_open_and_closes_short_input() {
+        use tokio::io::AsyncSeekExt;
+        let (connection, observed, server) = input_fixture().await;
+        let (_file, input) = input_file(b"binary\0input").await;
+        assert!(connection
+            .exec_with_input("input-ok", Duration::from_secs(2), 4096, input, 1)
+            .await
+            .unwrap_err()
+            .contains("长度"));
+        assert_eq!(observed.opened.load(Ordering::Acquire), 0);
+        let (_file, mut input) = input_file(b"binary\0input").await;
+        input.seek(std::io::SeekFrom::Start(4)).await.unwrap();
+        assert!(connection
+            .exec_with_input("input-ok", Duration::from_secs(2), 4096, input, 12)
+            .await
+            .unwrap_err()
+            .contains("缩短"));
+        wait_input_channels_closed(&observed).await;
+        assert_eq!(observed.closed.load(Ordering::Acquire), 1);
+        assert_eq!(observed.eof.load(Ordering::Acquire), 0);
+        connection.close().await;
+        server.cancel();
+    }
+
+    #[tokio::test]
+    async fn loopback_exec_input_closes_timeout_overflow_and_dropped_future() {
+        let (connection, observed, server) = input_fixture().await;
+        let (_file, input) = input_file(b"payload").await;
+        assert!(connection
+            .exec_with_input("input-hang", Duration::from_millis(100), 4096, input, 7)
+            .await
+            .unwrap_err()
+            .contains("超时"));
+        wait_input_channels_closed(&observed).await;
+        let (_file, input) = input_file(&vec![0x5a; 1024 * 1024]).await;
+        assert!(connection
+            .exec_with_input(
+                "input-overflow",
+                Duration::from_secs(3),
+                100,
+                input,
+                1024 * 1024
+            )
+            .await
+            .unwrap_err()
+            .contains("超过限制"));
+        wait_input_channels_closed(&observed).await;
+        let (_file, input) = input_file(b"payload").await;
+        let eofs_before_abort = observed.eof.load(Ordering::Acquire);
+        let task_connection = connection.clone();
+        let pending = tokio::spawn(async move {
+            task_connection
+                .exec_with_input("input-hang", Duration::from_secs(30), 4096, input, 7)
+                .await
+        });
+        timeout(Duration::from_secs(2), async {
+            while observed.eof.load(Ordering::Acquire) == eofs_before_abort {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        pending.abort();
+        let _ = pending.await;
+        wait_input_channels_closed(&observed).await;
+        assert_eq!(observed.opened.load(Ordering::Acquire), 3);
+        assert_eq!(observed.closed.load(Ordering::Acquire), 3);
+        // Timeout/abort/overflow affect their channel, not the authenticated connection.
+        let (_file, input) = input_file(b"payload").await;
+        assert_eq!(
+            connection
+                .exec_with_input("input-ok", Duration::from_secs(2), 4096, input, 7)
+                .await
+                .unwrap()
+                .exit_code,
+            Some(0)
+        );
+        connection.close().await;
+        server.cancel();
+    }
+
+    #[tokio::test]
+    async fn loopback_exec_input_stops_upload_on_early_remote_eof_or_failure() {
+        let (connection, observed, server) = input_fixture().await;
+        let data = vec![0x5a; 8 * 1024 * 1024];
+        for (command, message) in [
+            ("input-early-eof", "结束输出"),
+            ("input-early-error", "fixture-receive-failed"),
+        ] {
+            let (_file, input) = input_file(&data).await;
+            let error = connection
+                .exec_with_input(
+                    command,
+                    Duration::from_secs(3),
+                    4096,
+                    input,
+                    data.len() as u64,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains(message), "{error}");
+            wait_input_channels_closed(&observed).await;
+        }
+        assert_eq!(observed.eof.load(Ordering::Acquire), 0);
+        assert_eq!(observed.closed.load(Ordering::Acquire), 2);
+        connection.close().await;
+        server.cancel();
+    }
 
     struct FixtureSession {
         forwards: HashMap<u32, (CancellationToken, JoinHandle<()>)>,

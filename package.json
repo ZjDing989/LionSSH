@@ -1,6 +1,6 @@
 {
   "name": "lion-ssh",
-  "version": "1.8.3",
+  "version": "1.8.5",
   "description": "基于 Tauri 的多设备 SSH、隧道与显卡监测工作台",
   "author": "Lion SSH contributors",
   "private": true,

@@ -4,6 +4,7 @@ mod codex;
 mod crypto;
 mod model;
 mod monitor;
+mod native_payload;
 mod service;
 mod ssh;
 mod store;

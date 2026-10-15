@@ -2795,7 +2795,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lion-ssh"
-version = "1.8.3"
+version = "1.8.5"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
@@ -2815,6 +2815,7 @@ dependencies = [
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",

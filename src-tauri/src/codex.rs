@@ -1,7 +1,10 @@
 //! Codex installation discovery and explicitly requested updates over SSH.
 //! Only fixed operations are exposed. Paths come from a bounded probe and are
 //! quoted as shell literals; the renderer cannot supply a command or package.
-use crate::ssh::{CommandOutput, Executor};
+use crate::{
+    native_payload::NativePayload,
+    ssh::{CommandOutput, Executor},
+};
 use async_trait::async_trait;
 use semver::Version;
 use serde_json::{json, Value};
@@ -16,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 type Events = Arc<dyn Fn(&str, Value) + Send + Sync>;
 const MAX_OUTPUT: usize = 262_144;
 const REGISTRY_URL: &str = "https://registry.npmjs.org/@openai/codex/latest";
-const INSTALLER_URL: &str = "https://chatgpt.com/codex/install.sh";
+const MAX_PAYLOAD: u64 = 1_073_741_824;
 
 pub fn blank_state() -> Value {
     json!({"status":"unknown","installed":null,"currentVersion":null,"latestVersion":null,
@@ -56,6 +59,69 @@ fn failure(output: &CommandOutput, label: &str) -> String {
     };
     format!("{label}：{}", clipped(detail.trim(), 1600))
 }
+fn install_failure(output: &CommandOutput, installed: bool) -> String {
+    let raw = if output.stderr.trim().is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    let lower = raw.to_ascii_lowercase();
+    let permission = [
+        "eacces",
+        "permission denied",
+        "operation not permitted",
+        "权限不足",
+        "没有写入权限",
+    ]
+    .iter()
+    .any(|message| lower.contains(message));
+    let network = raw.contains("LION_CODEX_DOWNLOAD_FAILED_V1:network")
+        || (!raw.contains("LION_CODEX_DOWNLOAD_FAILED_V1:local")
+            && [
+                "curl: (5)",
+                "curl: (6)",
+                "curl: (7)",
+                "curl: (28)",
+                "timed out",
+                "timeout",
+                "could not resolve",
+                "failed to connect",
+                "etimedout",
+                "eai_again",
+                "enotfound",
+                "econnrefused",
+                "econnreset",
+            ]
+            .iter()
+            .any(|message| lower.contains(message)));
+    let label = if installed {
+        "Codex 更新失败"
+    } else {
+        "Codex 安装失败"
+    };
+    let reason = if permission {
+        "：当前 SSH 用户的写入权限不足，请检查所选安装目录或 npm 缓存权限"
+    } else if network {
+        "：服务器访问官方下载地址失败，请检查服务器外网、DNS或代理配置后重试"
+    } else if raw.contains("LION_CODEX_DOWNLOAD_FAILED_V1:") {
+        "：下载安装脚本失败，请根据详细错误修复后重试"
+    } else {
+        ""
+    };
+    let details = raw
+        .lines()
+        .filter(|line| !line.starts_with("LION_CODEX_DOWNLOAD_FAILED_V1:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let code = output
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "未知".into());
+    format!(
+        "{label}{reason}（退出码 {code}）：{}",
+        clipped(details.trim(), 1600)
+    )
+}
 
 // Values are hex encoded so paths, spaces, shell startup banners and version
 // output cannot break the record framing. No remote text is evaluated locally.
@@ -79,6 +145,7 @@ writable_parent() {
 }
 printf 'LION_CODEX_PROBE_V1\n'
 os=$(uname -s); arch=$(uname -m)
+if [ "$os" = Darwin ] && [ "$arch" = x86_64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then arch=arm64; fi
 emit os "$os"; emit arch "$arch"
 native_home=${CODEX_HOME:-$HOME/.codex}
 bin_dir=${CODEX_INSTALL_DIR:-$HOME/.local/bin}
@@ -133,8 +200,7 @@ fi
 case "$os:$arch" in Linux:x86_64|Linux:amd64|Linux:aarch64|Linux:arm64|Darwin:x86_64|Darwin:arm64|Darwin:aarch64) ;; *) reason='该服务器系统或处理器暂不支持自动安装';; esac
 if [ -z "$reason" ]; then
   if [ "$method" = native ]; then
-    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then reason='服务器需要 curl 或 wget 才能安装 Codex'
-    elif ! command -v tar >/dev/null 2>&1 || ! command -v mktemp >/dev/null 2>&1; then reason='服务器缺少 tar 或 mktemp'
+    if ! command -v tar >/dev/null 2>&1 || ! command -v mktemp >/dev/null 2>&1; then reason='服务器缺少 tar 或 mktemp'
     elif ! writable_parent "$native_home/packages/standalone" || ! writable_parent "$bin_dir"; then reason='当前 SSH 用户没有 Codex 安装目录的写入权限'
     else allowed=1; fi
   elif [ "$method" = npm ]; then
@@ -190,6 +256,7 @@ struct Probe {
     allowed: bool,
     reason: Option<String>,
     os: String,
+    arch: String,
 }
 impl Probe {
     fn parse(output: &str) -> Result<Self, String> {
@@ -251,7 +318,17 @@ impl Probe {
             allowed,
             reason,
             os: get("os"),
+            arch: get("arch"),
         })
+    }
+    fn target(&self) -> Result<&'static str, String> {
+        match (self.os.as_str(), self.arch.as_str()) {
+            ("Linux", "x86_64" | "amd64") => Ok("x86_64-unknown-linux-musl"),
+            ("Linux", "arm64" | "aarch64") => Ok("aarch64-unknown-linux-musl"),
+            ("Darwin", "x86_64" | "amd64") => Ok("x86_64-apple-darwin"),
+            ("Darwin", "arm64" | "aarch64") => Ok("aarch64-apple-darwin"),
+            _ => Err("该服务器系统或处理器暂不支持官方 Codex 原生安装包".into()),
+        }
     }
     fn state(&self, latest: Option<&Version>) -> Value {
         json!({"installed":self.installed,"currentVersion":self.current.as_ref().map(ToString::to_string),
@@ -479,16 +556,54 @@ fn install_script(probe: &Probe, latest: &Version) -> Result<String, String> {
         // with the selected installation, preserving NVM/custom prefixes.
         Ok(format!("# Lion Codex npm install V1\nset -eu\n{prefix}root=$({npm} root -g)\nroot=$(CDPATH= cd -P \"$root\" && pwd)\n[ \"$root\" = {root} ] || {{ echo 'npm 安装目录已变化，请重新检查' >&2; exit 1; }}\n{npm} install --global --prefix {npm_prefix} --no-audit --no-fund -- @openai/codex@{latest}\n",npm=quote(&probe.npm),root=quote(&probe.npm_root),npm_prefix=quote(&probe.npm_prefix)))
     } else if probe.method == "native" {
+        let target = probe.target()?;
         Ok(format!(
             r#"# Lion Codex native install V1
 set -eu
-{prefix}installer=$(mktemp)
-trap 'rm -f "$installer"' EXIT HUP INT TERM
-if command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 90 {url} -o "$installer"
-else wget -q -T 90 -O "$installer" {url}; fi
-env CODEX_NON_INTERACTIVE=1 CODEX_RELEASE=latest CODEX_INSTALL_DAEMON_ONLY=0 CODEX_INSTALL_DEFER_SELECTION=0 CODEX_INSTALL_IF_LATEST=0 CODEX_INSTALL_IF_CURRENT=0 CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=1 CODEX_INSTALL_DIR={bin} CODEX_HOME={home} sh "$installer"
+original_umask=$(umask)
+umask 077
+temp_root=$(CDPATH= cd -P "${{TMPDIR:-/tmp}}" && pwd)
+stage=$(mktemp -d "$temp_root/lion-codex-transfer.XXXXXXXX")
+cleanup() {{
+  case "$stage" in "$temp_root"/lion-codex-transfer.*) rm -rf "$stage";; esac
+}}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' HUP TERM
+tar -xf - -C "$stage"
+for entry in installer.sh release.json codex-package_SHA256SUMS codex-package-{target}.tar.gz; do
+  [ -f "$stage/$entry" ] && [ ! -L "$stage/$entry" ] && [ -s "$stage/$entry" ] || {{ echo 'Codex 完整安装包传输不完整，请重试' >&2; exit 65; }}
+done
+mkdir "$stage/bin"
+cat > "$stage/bin/curl" <<'LION_CODEX_PRIVATE_CURL'
+#!/bin/sh
+set -eu
+base=$(CDPATH= cd -P "$(dirname "$0")/.." && pwd)
+output=''; url=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -fsSL|-f|-s|-S|-L) shift;;
+    -o|--output) [ "$#" -ge 2 ] || exit 64; output=$2; shift 2;;
+    --connect-timeout|--max-time|--proto|--proto-redir) [ "$#" -ge 2 ] || exit 64; shift 2;;
+    https://*) [ -z "$url" ] || exit 64; url=$1; shift;;
+    *) echo '拒绝非预期的 Codex 安装器下载参数' >&2; exit 64;;
+  esac
+done
+case "$url" in
+  https://api.github.com/repos/openai/codex/releases/latest|https://api.github.com/repos/openai/codex/releases/tags/rust-v{version}) file="$base/release.json";;
+  https://github.com/openai/codex/releases/download/rust-v{version}/codex-package_SHA256SUMS) file="$base/codex-package_SHA256SUMS";;
+  https://github.com/openai/codex/releases/download/rust-v{version}/codex-package-{target}.tar.gz) file="$base/codex-package-{target}.tar.gz";;
+  *) echo '拒绝访问完整安装包以外的下载地址' >&2; exit 64;;
+esac
+if [ -z "$output" ]; then cat "$file"; else cp "$file" "$output"; fi
+LION_CODEX_PRIVATE_CURL
+chmod 700 "$stage/bin/curl"
+PATH="$stage/bin":{bin}:"$PATH"; export PATH
+umask "$original_umask"
+env CODEX_NON_INTERACTIVE=1 CODEX_RELEASE=latest CODEX_INSTALL_DAEMON_ONLY=0 CODEX_INSTALL_DEFER_SELECTION=0 CODEX_INSTALL_IF_LATEST=0 CODEX_INSTALL_IF_CURRENT=0 CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=0 CODEX_INSTALL_DIR={bin} CODEX_HOME={home} sh "$stage/installer.sh"
 "#,
-            url = quote(INSTALLER_URL),
+            version = latest,
+            target = target,
             bin = quote(&probe.bin_dir),
             home = quote(&probe.native_home)
         ))
@@ -533,9 +648,41 @@ printf 'LION_CODEX_RESTARTED_V1\n'
     )
 }
 
+struct PayloadInput {
+    file: tokio::fs::File,
+    size: u64,
+    _owner: Box<dyn Send + Sync>,
+}
+#[async_trait]
+trait PayloadSource: Send + Sync {
+    async fn prepare(&self, version: &Version, target: &str) -> Result<PayloadInput, String>;
+}
+struct OfficialPayload;
+#[async_trait]
+impl PayloadSource for OfficialPayload {
+    async fn prepare(&self, version: &Version, target: &str) -> Result<PayloadInput, String> {
+        let payload = NativePayload::fetch(version, target).await?;
+        if payload.archive_size == 0 || payload.archive_size > MAX_PAYLOAD {
+            return Err("Codex 完整安装包大小超出限制".into());
+        }
+        let file = tokio::fs::File::open(&payload.archive_path)
+            .await
+            .map_err(|e| format!("读取已校验的 Codex 完整安装包失败：{e}"))?;
+        if file.metadata().await.map_err(|e| e.to_string())?.len() != payload.archive_size {
+            return Err("Codex 完整安装包长度发生变化，请重试".into());
+        }
+        Ok(PayloadInput {
+            file,
+            size: payload.archive_size,
+            _owner: Box::new(payload),
+        })
+    }
+}
+
 pub struct CodexTool {
     executor: Arc<dyn Executor>,
     versions: Arc<dyn VersionSource>,
+    payloads: Arc<dyn PayloadSource>,
     events: Events,
     state: Mutex<Value>,
     operation: AsyncMutex<()>,
@@ -554,9 +701,18 @@ impl CodexTool {
         events: Events,
         versions: Arc<dyn VersionSource>,
     ) -> Arc<Self> {
+        Self::with_sources(executor, events, versions, Arc::new(OfficialPayload))
+    }
+    fn with_sources(
+        executor: Arc<dyn Executor>,
+        events: Events,
+        versions: Arc<dyn VersionSource>,
+        payloads: Arc<dyn PayloadSource>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             executor,
             versions,
+            payloads,
             events,
             state: Mutex::new(blank_state()),
             operation: AsyncMutex::new(()),
@@ -585,7 +741,11 @@ impl CodexTool {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        for line in message.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        for line in message
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with("LION_CODEX_DOWNLOAD_FAILED_V1:"))
+        {
             log.push(json!(clipped(line, 500)));
         }
         if log.len() > 60 {
@@ -596,6 +756,29 @@ impl CodexTool {
     async fn exec(&self, script: &str, seconds: u64) -> Result<CommandOutput, String> {
         let command = command(script);
         tokio::select! { biased; _=self.cancel.cancelled()=>Err("SSH 连接已断开，Codex 操作已取消".into()), result=self.executor.exec(&command,Duration::from_secs(seconds),MAX_OUTPUT)=>result }
+    }
+    async fn install_native(
+        &self,
+        probe: &Probe,
+        latest: &Version,
+        script: &str,
+    ) -> Result<CommandOutput, String> {
+        self.log("正在通过本机下载并校验官方 Codex 完整安装包…");
+        let payload = tokio::select! {biased;_=self.cancel.cancelled()=>return Err("SSH 连接已断开，Codex 操作已取消".into()),result=self.payloads.prepare(latest,probe.target()?)=>result?};
+        if payload.size == 0 || payload.size > MAX_PAYLOAD {
+            return Err("Codex 完整安装包大小超出限制".into());
+        }
+        self.log(&format!(
+            "完整安装包已校验（{:.1} MiB），正在通过 SSH 传送并安装…",
+            payload.size as f64 / 1_048_576.0
+        ));
+        let PayloadInput { file, size, _owner } = payload;
+        let command = command(script);
+        let result = tokio::select! {biased;_=self.cancel.cancelled()=>Err("SSH 连接已断开，Codex 操作已取消".into()),result=self.executor.exec_with_input(&command,Duration::from_secs(600),MAX_OUTPUT,file,size)=>result};
+        // Keep NativePayload's temporary directory alive until the stream and
+        // remote installer both finish, including cancellation/error paths.
+        drop(_owner);
+        result
     }
     async fn probe(&self) -> Result<Probe, String> {
         let output = self.exec(PROBE, 35).await?;
@@ -679,7 +862,11 @@ impl CodexTool {
         } else {
             "正在使用官方安装脚本安装 Codex…"
         });
-        let output = self.exec(&script, 600).await?;
+        let output = if before.method == "native" {
+            self.install_native(&before, &latest, &script).await?
+        } else {
+            self.exec(&script, 600).await?
+        };
         self.log(&output.stdout);
         if !output.stderr.trim().is_empty() {
             self.log(&output.stderr);
@@ -688,14 +875,7 @@ impl CodexTool {
             if let Ok(partial) = self.probe().await {
                 self.update(partial.state(Some(&latest)));
             }
-            return Err(failure(
-                &output,
-                if before.installed {
-                    "Codex 更新失败（未使用 sudo）"
-                } else {
-                    "Codex 安装失败（未使用 sudo）"
-                },
-            ));
+            return Err(install_failure(&output, before.installed));
         }
         let after = self.probe().await?;
         self.update(after.state(Some(&latest)));
@@ -893,7 +1073,9 @@ mod tests {
         current: Mutex<String>,
         allowed: AtomicBool,
         fail_install: AtomicBool,
+        fail_download: AtomicBool,
         block: AtomicBool,
+        block_input: AtomicBool,
         entered: tokio::sync::Notify,
         daemon: AtomicUsize,
         daemon_update: Mutex<String>,
@@ -908,7 +1090,9 @@ mod tests {
                 current: Mutex::new("0.2.0".into()),
                 allowed: AtomicBool::new(true),
                 fail_install: AtomicBool::new(false),
+                fail_download: AtomicBool::new(false),
                 block: AtomicBool::new(false),
+                block_input: AtomicBool::new(false),
                 entered: tokio::sync::Notify::new(),
                 daemon: AtomicUsize::new(0),
                 daemon_update: Mutex::new("updated".into()),
@@ -919,6 +1103,28 @@ mod tests {
     }
     #[async_trait]
     impl Executor for Fake {
+        async fn exec_with_input(
+            &self,
+            command: &str,
+            timeout: Duration,
+            max_output: usize,
+            mut input: tokio::fs::File,
+            input_size: u64,
+        ) -> Result<CommandOutput, String> {
+            if self.block_input.load(Ordering::SeqCst) {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            use tokio::io::AsyncReadExt;
+            let mut bytes = Vec::new();
+            input
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|e| e.to_string())?;
+            assert_eq!(bytes.len() as u64, input_size);
+            assert_eq!(bytes, b"fake verified payload");
+            self.exec(command, timeout, max_output).await
+        }
         async fn exec(
             &self,
             command: &str,
@@ -965,7 +1171,10 @@ mod tests {
             } else if command.contains("Lion Codex npm install V1")
                 || command.contains("Lion Codex native install V1")
             {
-                if self.fail_install.load(Ordering::SeqCst) {
+                if self.fail_download.load(Ordering::SeqCst) {
+                    code = 69;
+                    String::new()
+                } else if self.fail_install.load(Ordering::SeqCst) {
                     code = 1;
                     String::new()
                 } else {
@@ -978,12 +1187,36 @@ mod tests {
             };
             Ok(CommandOutput {
                 stdout,
-                stderr: if code == 0 {
+                stderr: if code == 69 {
+                    "LION_CODEX_DOWNLOAD_FAILED_V1:network\nhttps://releases.openai.com/codex/install.sh attempt 1: curl exit 28\ncurl: (28) Failed to connect: Connection timed out".into()
+                } else if code == 0 {
                     String::new()
                 } else {
                     "EACCES fixture permission denied".into()
                 },
                 exit_code: Some(code),
+            })
+        }
+    }
+    struct FakePayload {
+        fake: Arc<Fake>,
+    }
+    #[async_trait]
+    impl PayloadSource for FakePayload {
+        async fn prepare(&self, _version: &Version, target: &str) -> Result<PayloadInput, String> {
+            assert_eq!(target, "x86_64-unknown-linux-musl");
+            if self.fake.fail_download.load(Ordering::SeqCst) {
+                return Err("本机下载官方 Codex 完整包失败：网络或代理连接超时，请重试".into());
+            }
+            use std::io::{Seek, Write};
+            let mut file = tempfile::tempfile().map_err(|e| e.to_string())?;
+            file.write_all(b"fake verified payload")
+                .map_err(|e| e.to_string())?;
+            file.rewind().map_err(|e| e.to_string())?;
+            Ok(PayloadInput {
+                file: tokio::fs::File::from_std(file),
+                size: 21,
+                _owner: Box::new(()),
             })
         }
     }
@@ -993,13 +1226,15 @@ mod tests {
         });
         let states = Arc::new(Mutex::new(Vec::new()));
         let sent = states.clone();
-        let tool = CodexTool::with_versions(
+        let payloads = Arc::new(FakePayload { fake: fake.clone() });
+        let tool = CodexTool::with_sources(
             fake,
             Arc::new(move |event, value| {
                 assert_eq!(event, "codex");
                 sent.lock().unwrap().push(value);
             }),
             latest.clone(),
+            payloads,
         );
         (tool, latest, states)
     }
@@ -1049,7 +1284,7 @@ mod tests {
             .iter()
             .find(|c| c.contains("Lion Codex native install V1"))
             .unwrap();
-        assert!(install.contains(INSTALLER_URL));
+        assert!(install.contains("Lion Codex native install V1"));
         assert!(install.contains("CODEX_RELEASE=latest"));
         assert!(install.contains("CODEX_NON_INTERACTIVE=1"));
         assert!(!commands
@@ -1098,6 +1333,60 @@ mod tests {
         assert_eq!(tool.state.lock().unwrap()["updateAvailable"], true);
         fake.fail_install.store(false, Ordering::SeqCst);
         assert!(tool.install().await.is_ok());
+    }
+    #[tokio::test]
+    async fn failed_native_download_reports_server_network_and_can_retry_without_restarting() {
+        let fake = Fake::new("native", true);
+        fake.daemon.store(1, Ordering::SeqCst);
+        fake.fail_download.store(true, Ordering::SeqCst);
+        let (tool, _, states) = harness(fake.clone());
+        let error = tool.install().await.unwrap_err();
+        assert!(error.contains("本机") && error.contains("代理") && error.contains("重试"));
+        assert!(!error.contains("sudo") && !error.contains("LION_CODEX_DOWNLOAD_FAILED"));
+        let state = tool.state.lock().unwrap().clone();
+        assert_eq!(state["status"], "error");
+        assert_eq!(state["currentVersion"], "0.2.0");
+        assert_eq!(state["updateAvailable"], true);
+        assert_eq!(state["canInstall"], true);
+        assert_eq!(state["restartStatus"], Value::Null);
+        assert!(!states
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s["status"] == "restarting"));
+        assert!(!fake
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.contains("daemon update V1") || c.contains("service restart V1")));
+        assert!(!fake
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.contains("native install V1")));
+        fake.fail_download.store(false, Ordering::SeqCst);
+        assert_eq!(tool.install().await.unwrap()["currentVersion"], "0.3.0");
+    }
+    #[test]
+    fn install_errors_distinguish_permissions_from_download_network_errors() {
+        let output=CommandOutput {stdout:String::new(),stderr:"LION_CODEX_DOWNLOAD_FAILED_V1:network\nEACCES: permission denied, open '/custom npm prefix'".into(),exit_code:Some(23)};
+        let error = install_failure(&output, true);
+        assert!(error.contains("写入权限不足"));
+        assert!(!error.contains("服务器外网") && !error.contains("代理"));
+        assert!(!error.contains("sudo"));
+        assert!(error.contains("退出码 23"));
+        assert!(error.contains("EACCES"));
+        let output = CommandOutput {
+            stderr:
+                "LION_CODEX_DOWNLOAD_FAILED_V1:local\ncurl exit 23: Failed writing received data"
+                    .into(),
+            ..output
+        };
+        let error = install_failure(&output, false);
+        assert!(!error.contains("服务器外网"));
+        assert!(error.contains("下载安装脚本失败"));
     }
     #[tokio::test]
     async fn will_not_downgrade_or_replace_unknown_installations() {
@@ -1216,6 +1505,51 @@ mod tests {
             .unwrap()
             .is_err());
         assert_eq!(states.lock().unwrap().len(), count);
+    }
+    #[tokio::test]
+    async fn cancelled_native_transfer_does_not_install_restart_or_emit_late_results() {
+        let fake = Fake::new("native", true);
+        fake.block_input.store(true, Ordering::SeqCst);
+        let (tool, _, states) = harness(fake.clone());
+        let running = tool.clone();
+        let task = tokio::spawn(async move { running.install().await });
+        fake.entered.notified().await;
+        tool.stop();
+        let count = states.lock().unwrap().len();
+        assert!(tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        assert_eq!(*fake.current.lock().unwrap(), "0.2.0");
+        assert_eq!(states.lock().unwrap().len(), count);
+        assert!(!fake
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.contains("daemon update V1") || c.contains("service restart V1")));
+    }
+    #[test]
+    fn native_targets_use_complete_official_platform_packages() {
+        let mut probe = Probe::parse(&probe_output(true, "native", "0.2.0", true, "")).unwrap();
+        for (os, arch, target) in [
+            ("Linux", "x86_64", "x86_64-unknown-linux-musl"),
+            ("Linux", "arm64", "aarch64-unknown-linux-musl"),
+            ("Darwin", "x86_64", "x86_64-apple-darwin"),
+            ("Darwin", "aarch64", "aarch64-apple-darwin"),
+        ] {
+            probe.os = os.into();
+            probe.arch = arch.into();
+            assert_eq!(probe.target().unwrap(), target);
+            let script = install_script(&probe, &Version::new(0, 3, 0)).unwrap();
+            assert!(script.contains(&format!("codex-package-{target}.tar.gz")));
+            assert!(script.contains("CODEX_RELEASE=latest"));
+            assert!(script.contains("CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=0"));
+            assert!(!script.contains("chatgpt.com") && !script.contains("releases.openai.com"));
+        }
+        probe.arch = "riscv64".into();
+        assert!(probe.target().is_err());
     }
     #[test]
     fn bounded_protocol_rejects_control_characters_invalid_versions_and_field_spoofing() {

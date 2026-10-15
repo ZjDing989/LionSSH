@@ -1,6 +1,6 @@
 [package]
 name = "lion-ssh"
-version = "1.8.3"
+version = "1.8.5"
 description = "Lion SSH desktop application and native SSH backend"
 authors = ["Lion SSH contributors"]
 license = "Apache-2.0"
@@ -19,6 +19,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 tempfile = "3"
+tar = "0.4"
 semver = "1"
 minisign-verify = "0.3"
 serde_json = "1"

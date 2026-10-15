@@ -26,7 +26,9 @@
 
 Install or update Codex CLI on the selected server with one click. See the installed and latest stable versions; the tool detects the official installer or npm and preserves the installation method.
 
-It updates running official managed daemons or restarts verified native systemd user services, then reports version verification and restart results. Reopen ordinary interactive Codex sessions to use the new version. Operations use the current SSH user's permissions.
+Native packages are downloaded from official sources and verified on your computer, then transferred over SSH to work around restricted server downloads.
+
+It updates running official managed daemons or restarts verified native systemd user services, then reports version verification and restart results. Reopen ordinary interactive Codex sessions to use the new version. Operations preserve the current SSH user and original installation directories, without `sudo`.
 
 ### Command line (Terminal)
 
