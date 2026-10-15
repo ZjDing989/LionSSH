@@ -116,6 +116,11 @@ jobs:
           npm run prepare:licenses
       - name: Test Windows backend and native SSH integration
         if: runner.os == 'Windows'
+        env:
+          # Keep Git's POSIX shell and Rust on the same path spelling; the
+          # default Windows TEMP may use an 8.3 username such as RUNNER~1.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: npm test
       - name: Test Windows renderer in Chrome
         if: runner.os == 'Windows'
