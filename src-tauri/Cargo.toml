@@ -1,0 +1,59 @@
+[package]
+name = "lion-ssh"
+version = "1.7.0"
+description = "Lion SSH desktop application and native SSH backend"
+authors = ["Lion SSH contributors"]
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.90"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-opener = "2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+tempfile = "3"
+semver = "1"
+minisign-verify = "0.3"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+russh = { version = "0.64.1", default-features = false, features = ["ring", "rsa", "flate2"] }
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+regex = "1"
+rand = "0.9"
+tokio-util = { version = "0.7", features = ["rt"] }
+base64 = "0.22"
+tokio = { version = "1", features = ["full"] }
+rfd = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(not(windows))'.dependencies]
+aes-gcm = "0.10.3"
+dirs = "6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+[dev-dependencies]
+aes-gcm = "0.10.3"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

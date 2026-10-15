@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4f6fa" />
+    <title>Lion SSH · 连接工作台</title>
+    <style>
+      body { margin: 0; background: #f4f6fa; }
+      #startup-shell { position: fixed; inset: 0; display: grid; place-content: center; justify-items: center; gap: 15px; background: radial-gradient(ellipse at 25% 15%, #e9f1ff, transparent 60%), #f4f6fa; color: #334866; font: 14px "Segoe UI", "Microsoft YaHei", sans-serif; }
+      #startup-shell strong { font-size: 24px; letter-spacing: -.7px; }
+      #startup-shell span { color: #8292ac; }
+      .startup-ring { width: 30px; height: 30px; margin-bottom: 7px; border: 3px solid #dae4f4; border-top-color: #7195e8; border-radius: 50%; animation: startup-spin 1s linear infinite; }
+      @keyframes startup-spin { to { transform: rotate(360deg); } }
+      @media (prefers-color-scheme: dark) { body { background: #141a24; } #startup-shell { background: radial-gradient(ellipse at 25% 15%, #1d2c43, transparent 60%), #141a24; color: #d3deef; } #startup-shell span { color: #8b9bb2; } .startup-ring { border-color: #2d3c54; border-top-color: #86a7ef; } }
+      @media (prefers-reduced-motion: reduce) { .startup-ring { animation-duration: 3s; } }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="startup-shell" role="status" aria-live="polite"><i class="startup-ring" aria-hidden="true"></i><strong>Lion SSH</strong><span>正在准备连接工作台…</span></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,39 @@
+{
+  "storage": {
+    "scan": "# Lion storage scan v1\nuid=$(id -u) || exit 1\ncase \"$uid\" in ''|*[!0-9]*) exit 1 ;; esac\nprintf 'LION_STORAGE_V1\\t%s\\n' \"$uid\"\nprintf 'HOME\\t'\n{ find -H '/home/tester' -xdev -mindepth 1 -uid \"$uid\" -printf 'ENTRY\\t%D\\t%i\\t%b\\t%y\\n'; printf 'EXIT\\t%s\\n' \"$?\"; } | awk -F '\\t' '\n$1 == \"ENTRY\" { if (!seen[$2 \":\" $3]++) bytes += $4 * 512; entries++; if ($5 == \"f\" || $5 == \"l\") candidates++ }\n$1 == \"EXIT\" { code = $2; finished = 1 }\nEND { printf \"%.0f\\t%d\\t%d\\t%d\\n\", bytes, entries, candidates, finished ? code : 99 }'\nprintf 'TMP\\t'\n{ find -P '/tmp' -xdev -mindepth 1 \\( -type d ! -uid \"$uid\" \\( ! -readable -o ! -executable \\) -prune \\) -o \\( -uid \"$uid\" -printf 'ENTRY\\t%D\\t%i\\t%b\\t%y\\n' \\); printf 'EXIT\\t%s\\n' \"$?\"; } | awk -F '\\t' '\n$1 == \"ENTRY\" { if (!seen[$2 \":\" $3]++) bytes += $4 * 512; entries++; if ($5 == \"f\" || $5 == \"l\") candidates++ }\n$1 == \"EXIT\" { code = $2; finished = 1 }\nEND { printf \"%.0f\\t%d\\t%d\\t%d\\n\", bytes, entries, candidates, finished ? code : 99 }'",
+    "preview": "# Lion tmp preview v1\nuid=$(id -u) || exit 1\ncase \"$uid\" in ''|*[!0-9]*) exit 1 ;; esac\nif [ -L /tmp ] || [ ! -d /tmp ]; then printf '临时目录不是可安全清理的实际目录\\n' >&2; exit 1; fi\nprintf 'LION_TMP_PREVIEW_V1\\t%s\\n' \"$uid\"\nprintf 'TMP\\t'\n{ find -P '/tmp' -xdev -mindepth 1 \\( -type d ! -uid \"$uid\" \\( ! -readable -o ! -executable \\) -prune \\) -o \\( -uid \"$uid\" -printf 'ENTRY\\t%D\\t%i\\t%b\\t%y\\n' \\); printf 'EXIT\\t%s\\n' \"$?\"; } | awk -F '\\t' '\n$1 == \"ENTRY\" { if (!seen[$2 \":\" $3]++) bytes += $4 * 512; entries++; if ($5 == \"f\" || $5 == \"l\") candidates++ }\n$1 == \"EXIT\" { code = $2; finished = 1 }\nEND { printf \"%.0f\\t%d\\t%d\\t%d\\n\", bytes, entries, candidates, finished ? code : 99 }'",
+    "cleanup1000": "# Lion tmp cleanup v1\nPATH=/usr/bin:/bin\nexport PATH\nuid=$(id -u) || exit 1\ncase \"$uid\" in ''|*[!0-9]*) exit 1 ;; esac\nif [ \"$uid\" != '1000' ] || [ \"$uid\" = 0 ]; then printf '用户 UID 已变化或禁止清理 root 临时文件\\n' >&2; exit 1; fi\nif [ -L /tmp ] || [ ! -d /tmp ]; then printf '临时目录不是可安全清理的实际目录\\n' >&2; exit 1; fi\nprintf 'LION_TMP_CLEANUP_V1\\t%s\\n' \"$uid\"\ntotal=0\nresult=$({ find -P /tmp -xdev -mindepth 1 \\( -type d ! -uid \"$uid\" \\( ! -readable -o ! -executable \\) -prune \\) -o \\( -uid \"$uid\" \\( -type f -o -type l \\) -execdir /bin/sh -c 'uid=\"$1\"; shift\nfind -P \"$@\" -maxdepth 0 -uid \"$uid\" \\( -type f -o -type l \\) -delete -printf '\"'\"'DELETED\\n'\"'\"'' lion-tmp \"$uid\" {} + -prune \\); printf 'EXIT\\t%s\\n' \"$?\"; } | awk -F '\\t' '\n$1 == \"DELETED\" { count++ }\n$1 == \"EXIT\" { code = $2; finished = 1 }\nEND { printf \"%d %d\\n\", count, finished ? code : 99 }')\ncase \"$result\" in ''|*[!0-9' ']*) exit 1 ;; esac\nset -- $result\nif [ \"$#\" != 2 ]; then exit 1; fi\ntotal=$1\nstatus=$2\nround=0\nif [ \"$status\" = 0 ]; then\n  while [ \"$round\" -lt 128 ]; do\n    round=$((round + 1))\n    if [ -L /tmp ] || [ ! -d /tmp ]; then status=1; break; fi\n    result=$({ find -P /tmp -xdev -mindepth 1 \\( -type d ! -uid \"$uid\" \\( ! -readable -o ! -executable \\) -prune \\) -o \\( -uid \"$uid\" -type d -empty -execdir /bin/sh -c 'uid=\"$1\"; shift\nfind -P \"$@\" -maxdepth 0 -uid \"$uid\" -type d -empty -delete -printf '\"'\"'DELETED\\n'\"'\"'' lion-tmp \"$uid\" {} + -prune \\); printf 'EXIT\\t%s\\n' \"$?\"; } | awk -F '\\t' '\n$1 == \"DELETED\" { count++ }\n$1 == \"EXIT\" { code = $2; finished = 1 }\nEND { printf \"%d %d\\n\", count, finished ? code : 99 }')\n    case \"$result\" in ''|*[!0-9' ']*) exit 1 ;; esac\n    set -- $result\n    if [ \"$#\" != 2 ]; then exit 1; fi\n    total=$((total + $1))\n    status=$2\n    if [ \"$status\" != 0 ] || [ \"$1\" = 0 ]; then break; fi\n    if [ \"$round\" = 128 ]; then status=2; fi\n  done\nfi\nprintf 'RESULT\\t%s\\t%s\\n' \"$total\" \"$status\""
+  },
+  "jobs": {
+    "4201": {
+      "info": "scontrol show job 4201",
+      "priority": "scontrol show job 4201 | grep -o 'Priority=[0-9]*'",
+      "cancel": "scancel 4201"
+    },
+    "4202": {
+      "info": "scontrol show job 4202",
+      "priority": "scontrol show job 4202 | grep -o 'Priority=[0-9]*'",
+      "cancel": "scancel 4202"
+    },
+    "4203": {
+      "info": "scontrol show job 4203",
+      "priority": "scontrol show job 4203 | grep -o 'Priority=[0-9]*'",
+      "cancel": "scancel 4203"
+    },
+    "5100_7": {
+      "info": "scontrol show job 5100_7",
+      "priority": "scontrol show job 5100_7 | grep -o 'Priority=[0-9]*'",
+      "cancel": "scancel 5100_7"
+    },
+    "5100_[1-5%2]": {
+      "info": "scontrol show job 5100",
+      "priority": "scontrol show job 5100 | grep -o 'Priority=[0-9]*'",
+      "cancel": "scancel '5100_[1-5]'"
+    },
+    "5100+0": {
+      "info": "scontrol show job 5100+0",
+      "priority": "scontrol show job 5100+0 | grep -o 'Priority=[0-9]*'",
+      "cancel": "scancel 5100+0"
+    }
+  }
+}

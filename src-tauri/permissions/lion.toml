@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-lion-request"
+description = "Allows the main window to call the allowlisted SSH application bridge."
+commands.allow = ["lion_request"]

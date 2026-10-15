@@ -1,0 +1,40 @@
+{
+  "name": "lion-ssh",
+  "version": "1.7.0",
+  "description": "基于 Tauri 的多设备 SSH、隧道与显卡监测工作台",
+  "author": "Lion SSH contributors",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/tauri.cjs dev",
+    "start": "npm run dev",
+    "dev:frontend": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "build": "npm run build:frontend",
+    "build:frontend": "vue-tsc --noEmit && vite build",
+    "prepare:licenses": "node scripts/licenses.cjs",
+    "tauri": "node scripts/tauri.cjs",
+    "test": "node scripts/test.cjs",
+    "test:ui": "npm run build:frontend && node scripts/slurm-ui-smoke.cjs && node scripts/ui-actions-smoke.cjs",
+    "smoke": "node scripts/desktop-smoke.cjs",
+    "smoke:data": "node scripts/data-directory-smoke.cjs",
+    "pack": "node scripts/package.cjs --portable-only",
+    "dist": "npm run dist:win",
+    "dist:win": "node scripts/package.cjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.4",
+    "vue": "^3.5.22"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.3",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "fflate": "^0.8.2",
+    "playwright": "^1.56.0",
+    "ssh2": "^1.17.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.9",
+    "vue-tsc": "^3.1.1"
+  },
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22.12.0" },
+  "repository": { "type": "git", "url": "https://github.com/ZjDing989/LionSSH.git" }
+}
