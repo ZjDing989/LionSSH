@@ -31,15 +31,33 @@ async function withReleaseEnvironment(action) {
   }
 }
 
-test('release preparation refreshes stale draft notes without generating extra text', async () => {
+test('release preparation finds a draft beyond the first page even though the tag endpoint returns 404', async () => {
   await withReleaseEnvironment(async (version, notes) => {
     let updated;
+    const pagesRead = [];
     const draft = { id: 42, draft: true, tag_name: `v${version}`, body: 'Old generated notes' };
-    const github = { rest: { repos: {
-      getReleaseByTag: async () => ({ data: draft }),
+    const github = { paginate: async (endpoint, input) => {
+      assert.equal(endpoint, github.rest.repos.listReleases);
+      assert.equal(input.per_page, 100);
+      const releases = [];
+      for (let page = 1; ; page++) {
+        const { data } = await endpoint({ ...input, page });
+        releases.push(...data);
+        if (data.length < input.per_page) return releases;
+      }
+    }, rest: { repos: {
+      getReleaseByTag: async () => { const error = new Error('Draft releases are not returned by tag'); error.status = 404; throw error; },
+      listReleases: async input => {
+        pagesRead.push(input.page);
+        return { data: input.page === 1
+          ? Array.from({ length: 100 }, (_, id) => ({ id: 1000 + id, draft: false, tag_name: `v0.0.${id}` }))
+          : [draft] };
+      },
+      createRelease: async () => assert.fail('An existing draft must not be duplicated'),
       updateRelease: async input => { updated = input; return { data: { ...draft, body: input.body } }; },
     } } };
     assert.equal(await prepareRelease({ github, context, core }), 42);
+    assert.deepEqual(pagesRead, [1, 2]);
     assert.equal(updated.body, notes);
     assert.equal(updated.release_id, 42);
     assert.equal(updated.draft, undefined, 'Preparation must leave the release draft');
@@ -49,14 +67,48 @@ test('release preparation refreshes stale draft notes without generating extra t
 test('release creation starts as a draft with the version-specific notes', async () => {
   await withReleaseEnvironment(async (version, notes) => {
     let created;
-    const github = { rest: { repos: {
-      getReleaseByTag: async () => { const error = new Error('Not found'); error.status = 404; throw error; },
+    const github = { paginate: async (endpoint, input) => {
+      assert.equal(endpoint, github.rest.repos.listReleases);
+      assert.equal(input.per_page, 100);
+      return [{ id: 7, draft: true, tag_name: 'v0.0.1' }];
+    }, rest: { repos: {
+      listReleases() {},
       createRelease: async input => { created = input; return { data: { id: 42, ...input } }; },
     } } };
     assert.equal(await prepareRelease({ github, context, core }), 42);
     assert.equal(created.body, notes);
     assert.equal(created.draft, true);
     assert.equal(created.tag_name, `v${version}`);
+  });
+});
+
+test('release preparation refuses a published release and multiple matching drafts', async () => {
+  await withReleaseEnvironment(async (version) => {
+    const draft = { id: 42, draft: true, tag_name: `v${version}` };
+    const cases = [
+      { releases: [{ ...draft, draft: false }], error: /published release/ },
+      { releases: [draft, { ...draft, id: 43 }], error: /Multiple draft releases.*42, 43/ },
+      { releases: [draft, { ...draft, id: 43, draft: false }], error: /published release/ },
+    ];
+    for (const { releases, error } of cases) {
+      const github = { paginate: async () => releases, rest: { repos: {
+        listReleases() {},
+        createRelease: async () => assert.fail('Ambiguous or published versions must not create a release'),
+        updateRelease: async () => assert.fail('Ambiguous or published versions must not be updated'),
+      } } };
+      await assert.rejects(prepareRelease({ github, context, core }), error);
+    }
+  });
+});
+
+test('release listing failures propagate without creating another draft', async () => {
+  await withReleaseEnvironment(async () => {
+    const failure = Object.assign(new Error('Cannot list releases'), { status: 404 });
+    const github = { paginate: async () => { throw failure; }, rest: { repos: {
+      listReleases() {},
+      createRelease: async () => assert.fail('A failed lookup must not be treated as an absent draft'),
+    } } };
+    await assert.rejects(prepareRelease({ github, context, core }), failure);
   });
 });
 

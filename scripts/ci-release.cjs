@@ -68,13 +68,16 @@ async function validate(project = root, tag = process.env.RELEASE_TAG, requireSi
 async function prepareRelease({ github, context, core }) {
   const info = await validate();
   const notes = await releaseNotes(info.version);
+  // The tag endpoint only returns published releases. Drafts must be found in
+  // the authenticated release list, including releases beyond its first page.
+  const matches = (await github.paginate(github.rest.repos.listReleases, { ...context.repo, per_page: 100 }))
+    .filter(release => release.tag_name === info.tag);
+  if (matches.some(release => !release.draft)) throw new Error('This tag already has a published release; create a new version instead');
+  if (matches.length > 1) throw new Error(`Multiple draft releases exist for ${info.tag} (${matches.map(release => release.id).join(', ')}); remove duplicates before retrying`);
   let release;
-  try {
-    release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag: info.tag })).data;
-    if (!release.draft) throw new Error('This tag already has a published release; create a new version instead');
-    release = (await github.rest.repos.updateRelease({ ...context.repo, release_id: release.id, body: notes })).data;
-  } catch (error) {
-    if (error.status !== 404) throw error;
+  if (matches.length === 1) {
+    release = (await github.rest.repos.updateRelease({ ...context.repo, release_id: matches[0].id, body: notes })).data;
+  } else {
     release = (await github.rest.repos.createRelease({ ...context.repo, tag_name: info.tag, target_commitish: context.sha,
       name: `Lion SSH ${info.tag}`, body: notes, draft: true, prerelease: info.prerelease })).data;
   }

@@ -12,13 +12,23 @@ use std::{
 fn shell_path(path: &Path) -> String {
     let value = path.to_string_lossy().replace('\\', "/");
     #[cfg(windows)]
-    if value.as_bytes().get(1) == Some(&b':') {
-        return format!(
-            "/{}/{}",
-            value[..1].to_ascii_lowercase(),
-            value[3..].trim_start_matches('/')
-        );
+    {
+        // std::fs::canonicalize expands 8.3 aliases and returns verbatim Win32
+        // paths. Git's POSIX shell needs their ordinary drive/UNC spelling.
+        if let Some(unc) = value.strip_prefix("//?/UNC/") {
+            return format!("//{unc}");
+        }
+        let value = value.strip_prefix("//?/").unwrap_or(&value);
+        if value.as_bytes().get(1) == Some(&b':') {
+            return format!(
+                "/{}/{}",
+                value[..1].to_ascii_lowercase(),
+                value[3..].trim_start_matches('/')
+            );
+        }
+        return value.to_owned();
     }
+    #[cfg(not(windows))]
     value
 }
 
@@ -54,9 +64,9 @@ impl Server {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("server home's files");
         fs::create_dir_all(&home).unwrap();
-        // macOS commonly exposes TMPDIR through /var -> /private/var. Match
-        // the canonical paths returned by the remote probe's `cd -P`.
-        #[cfg(unix)]
+        // Match the physical paths returned by the probe's `cd -P`: macOS
+        // expands /var -> /private/var; Windows expands TEMP's RUNNER~1 alias.
+        // Canonicalize the existing root once, before joining future paths.
         let home = fs::canonicalize(home).unwrap();
         let bin = home.join("fixture-bin");
         let tools = home.join("fixture-tools");
@@ -178,6 +188,24 @@ impl Server {
             os: "Linux".into(),
         }
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_shell_paths_accept_canonical_verbatim_disks_and_unc_paths() {
+    for input in [
+        r"C:\Users\runneradmin\server home's files\node prefix",
+        r"\\?\C:\Users\runneradmin\server home's files\node prefix",
+    ] {
+        assert_eq!(
+            shell_path(Path::new(input)),
+            "/c/Users/runneradmin/server home's files/node prefix"
+        );
+    }
+    assert_eq!(
+        shell_path(Path::new(r"\\?\UNC\server\share\server home's files")),
+        "//server/share/server home's files"
+    );
 }
 
 #[test]

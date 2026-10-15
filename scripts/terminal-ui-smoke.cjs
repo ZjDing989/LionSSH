@@ -351,5 +351,23 @@ async function verifyContextMenuTarget(target) {
     const report = { ok: true, operations: 'renderer mock only', defaultOneTerminal: true, multipleTabs: true, renameByDoubleClick: true, inputAndResize: true, activeTabRefocus: true, pageRetention: true, serverIsolation: true, noAutomaticReopenAfterClosingAll: true, loadingRetry: true, creationRetry: true, disconnectedTabsRetained: true, darkAndLightThemes: true, terminalRendering: rendering[0], renderingAcrossNewSessions: rendering.length, reducedMotionKeepsCursor: true, contextMenuPreservesPropagationOutsideTerminal: true, clipboard, clipboardEdges, productionStyleCsp: true, cspErrors, rendererErrors: errors };
     await fs.writeFile(path.join(output, 'terminal-ui-smoke.json'), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
+  } catch (error) {
+    // CI render/viewport failures need the current fixture geometry, rather
+    // than only a locator stack after the browser has already been closed.
+    const diagnostics = await page.evaluate(() => ({
+      viewport: { width: innerWidth, height: innerHeight, scale: devicePixelRatio },
+      activeTab: document.querySelector('[data-testid="terminal-tab"][aria-selected="true"]')?.getAttribute('data-terminal-id'),
+      surfaces: [...document.querySelectorAll('[data-testid="terminal-surface"]')].map(surface => {
+        const rect = surface.getBoundingClientRect();
+        return { id: surface.getAttribute('data-terminal-id'), bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, markers: [...surface.querySelectorAll('.xterm-rows span')].filter(span => span.textContent.includes('LION_GREEN')).map(span => {
+          const bounds = span.getBoundingClientRect();
+          return { text: span.textContent, connected: span.isConnected, bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } };
+        }) };
+      }),
+      clipboardCalls: window.__lionTerminalClipboardTest?.calls,
+    })).catch(diagnosticError => ({ error: diagnosticError.message }));
+    await fs.writeFile(path.join(output, 'terminal-ui-smoke-failure.json'), JSON.stringify({ error: error.stack, diagnostics }, null, 2));
+    await page.screenshot({ path: path.join(output, 'terminal-ui-smoke-failure.png'), animations: 'disabled' }).catch(() => {});
+    throw error;
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

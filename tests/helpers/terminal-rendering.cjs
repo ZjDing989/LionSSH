@@ -51,14 +51,52 @@ function terminalSurface(page, terminalId) {
 }
 
 async function selectTerminalText(page, terminalId, marker = 'LION_GREEN') {
-  const span = terminalSurface(page, terminalId).locator('.xterm-rows span').filter({ hasText: marker }).last();
-  await span.waitFor({ state: 'visible' });
-  const bounds = await span.boundingBox();
+  const selector = `[data-testid="terminal-surface"][data-terminal-id=${JSON.stringify(terminalId)}]`;
+  await terminalSurface(page, terminalId).waitFor({ state: 'visible' });
+  // xterm replaces its text spans on a render. Waiting for a locator and then
+  // measuring it in a separate browser call can catch a detached span during
+  // the final render after disconnect. Measure a current glyph range in one
+  // page execution, and wait for layout to settle before using the coordinates.
+  const result = await page.waitForFunction(async ({ selector, marker }) => {
+    const measure = () => {
+      const surface = document.querySelector(selector);
+      const screen = surface?.querySelector('.xterm-screen');
+      if (!screen) return null;
+      const screenBounds = screen.getBoundingClientRect();
+      const spans = [...surface.querySelectorAll('.xterm-rows span')].reverse();
+      for (const span of spans) {
+        const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          const start = node.textContent.indexOf(marker);
+          if (start < 0) continue;
+          const range = document.createRange();
+          range.setStart(node, start);
+          range.setEnd(node, start + marker.length);
+          const bounds = range.getBoundingClientRect();
+          const visible = bounds.width > 0 && bounds.height > 0 && bounds.left >= Math.max(0, screenBounds.left) && bounds.right <= Math.min(innerWidth, screenBounds.right) && bounds.top >= Math.max(0, screenBounds.top) && bounds.bottom <= Math.min(innerHeight, screenBounds.bottom);
+          if (visible) return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+        }
+      }
+      return null;
+    };
+    const before = measure();
+    if (!before) return false;
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const after = measure();
+    if (!after || ['x', 'y', 'width', 'height'].some(key => Math.abs(before[key] - after[key]) > 0.25)) return false;
+    return after;
+  }, { selector, marker }, { timeout: 10000 });
+  const bounds = await result.jsonValue();
+  await result.dispose();
   assert.ok(bounds && bounds.width > 0 && bounds.height > 0);
   // xterm intentionally handles pointer events on its screen overlay. Use the
-  // visible glyph position for a real mouse gesture rather than dispatching an
-  // artificial event directly to its pointer-events:none text span.
-  await page.mouse.dblclick(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  // glyph boundaries for an actual drag selection, not DOM selection or a
+  // synthetic event on its pointer-events:none text spans.
+  const y = bounds.y + bounds.height / 2;
+  await page.mouse.move(bounds.x + 1, y);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width + 1, y, { steps: 8 });
+  await page.mouse.up();
   await page.waitForFunction(id => document.querySelector(`[data-testid="terminal-surface"][data-terminal-id="${id}"] .xterm-selection`)?.childElementCount > 0, terminalId);
 }
 
