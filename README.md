@@ -4,7 +4,7 @@
 
 <p align="center">多设备 SSH、端口隧道、显卡监测与 Slurm 作业管理，在一个简洁的工作台内完成。</p>
 
-桌面应用基于 **Tauri 2 + Rust + Vue 3 + TypeScript**。SSH、隧道、监测、配置存储和凭据加密均在 Rust 主程序内运行，发行包不包含 Node.js 运行时或 Node 后台。1.7.0 加入跨平台发布与签名更新：Windows 使用 WebView2，macOS 使用系统 WebKit，Linux 使用 WebKitGTK 4.1。
+桌面应用基于 **Tauri 2 + Rust + Vue 3 + TypeScript**。SSH、隧道、监测、配置存储和凭据加密均在 Rust 主程序内运行，发行包不包含 Node.js 运行时或 Node 后台。1.7.1 加入跨平台发布与签名更新：Windows 使用 WebView2，macOS 使用系统 WebKit，Linux 使用 WebKitGTK 4.1。
 
 ## 功能
 
@@ -58,23 +58,23 @@
 
 **[前往 GitHub Releases 下载 Lion SSH](https://github.com/ZjDing989/LionSSH/releases)**
 
-选择与系统和处理器匹配的附件。以 1.7.0 为例，发布流程的目标产物如下；实际可下载版本及构建结果以 Releases 和 [GitHub Actions](https://github.com/ZjDing989/LionSSH/actions/workflows/release.yml) 为准。
+选择与系统和处理器匹配的附件。以 1.7.1 为例，发布流程的目标产物如下；实际可下载版本及构建结果以 Releases 和 [GitHub Actions](https://github.com/ZjDing989/LionSSH/actions/workflows/release.yml) 为准。
 
 | 平台 | 文件 | 使用方式 |
 | --- | --- | --- |
-| Windows x64 多文件便携版 | `Lion-SSH-1.7.0-windows-x64-portable.zip` | 解压后运行 `Lion SSH.exe`，保留整个目录和旁边的 `data/` |
-| Windows x64 安装版 | `Lion-SSH-1.7.0-windows-x64-setup.exe` | 当前用户安装，创建开始菜单入口；默认安装目录为 `%LOCALAPPDATA%\Programs\Lion SSH` |
-| macOS Apple Silicon | `Lion-SSH-1.7.0-macos-aarch64.dmg` | 适用于 Apple 芯片；打开 DMG，将应用拖到“应用程序”后运行 |
-| macOS Intel | `Lion-SSH-1.7.0-macos-x86_64.dmg` | 适用于 Intel 芯片；打开 DMG，将应用拖到“应用程序”后运行 |
-| Linux x86_64 AppImage | `Lion-SSH-1.7.0-linux-x86_64.AppImage` | 添加可执行权限后运行，放在当前用户可写目录可使用内置更新 |
+| Windows x64 多文件便携版 | `Lion-SSH-1.7.1-windows-x64-portable.zip` | 解压后运行 `Lion SSH.exe`，保留整个目录和旁边的 `data/` |
+| Windows x64 安装版 | `Lion-SSH-1.7.1-windows-x64-setup.exe` | 当前用户安装，创建开始菜单入口；默认安装目录为 `%LOCALAPPDATA%\Programs\Lion SSH` |
+| macOS Apple Silicon | `Lion-SSH-1.7.1-macos-aarch64.dmg` | 适用于 Apple 芯片；打开 DMG，将应用拖到“应用程序”后运行 |
+| macOS Intel | `Lion-SSH-1.7.1-macos-x86_64.dmg` | 适用于 Intel 芯片；打开 DMG，将应用拖到“应用程序”后运行 |
+| Linux x86_64 AppImage | `Lion-SSH-1.7.1-linux-x86_64.AppImage` | 添加可执行权限后运行，放在当前用户可写目录可使用内置更新 |
 
 Windows 安装时可以修改目录，升级会保留已经选择的安装目录。安装版和便携版都在主程序旁读取及保存 `data/`。两种版本支持 Windows 10/11，均需要 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)；安装版会检测并在缺少时联网安装 WebView2，便携版需要电脑已安装该运行时。
 
 Linux 需要提供 WebKitGTK 4.1 的桌面环境。记住凭据还需要已解锁的桌面 Secret Service，例如 GNOME Keyring 或兼容的 KWallet；没有可用密钥环时可以不记住密码。AppImage 示例：
 
 ```sh
-chmod +x Lion-SSH-1.7.0-linux-x86_64.AppImage
-./Lion-SSH-1.7.0-linux-x86_64.AppImage
+chmod +x Lion-SSH-1.7.1-linux-x86_64.AppImage
+./Lion-SSH-1.7.1-linux-x86_64.AppImage
 ```
 
 **签名与系统信任：** 自动更新包使用应用内公钥验证的 Tauri 更新签名。当前 macOS 发布流程尚未配置 Apple Developer ID 代码签名和 Apple 公证，因此更新签名不等于 macOS 的系统信任，Gatekeeper 仍可能阻止首次打开。核实下载来自本项目 Releases 后，可参照 [Apple 的应用安全打开说明](https://support.apple.com/zh-cn/102445)。Windows 当前也未配置 Authenticode 代码签名，可能出现 SmartScreen 提示。macOS 正式代码签名与公证的配置方式见 [Tauri 文档](https://v2.tauri.app/distribute/sign/macos/)。
@@ -165,15 +165,15 @@ npm.cmd run dist:win
 
 ```text
 release/
-├─ Lion-SSH-1.7.0-windows-x64-portable/
+├─ Lion-SSH-1.7.1-windows-x64-portable/
 │  ├─ Lion SSH.exe
 │  ├─ portable.json
 │  ├─ licenses/            # 第三方开源声明与许可证
 │  ├─ LICENSE.txt
 │  ├─ 使用说明.txt
 │  └─ manifest.json        # 分发文件 SHA256 清单
-├─ Lion-SSH-1.7.0-windows-x64-portable.zip
-└─ Lion-SSH-1.7.0-windows-x64-setup.exe
+├─ Lion-SSH-1.7.1-windows-x64-portable.zip
+└─ Lion-SSH-1.7.1-windows-x64-setup.exe
 ```
 
 `npm run pack` 只生成多文件便携目录及 ZIP，`npm run dist` 与 `npm run dist:win` 等效。重新打包时按旧清单移除旧程序文件，保留已有 `data/` 和用户额外文件；ZIP 只包含本次分发文件。`scripts/licenses.cjs` 根据锁定的 Rust 和前端生产依赖生成许可证资源，并随两个版本分发。
@@ -205,7 +205,7 @@ Tauri 原生产物位于 `src-tauri/target/<target>/release/bundle/`。生成用
 
 ## GitHub Actions 发布
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) 支持推送 `v*` 数字版本标签和手动触发。手动运行需填写已经存在的标签，例如 `v1.7.0`；标签版本必须与 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 一致。
+[`.github/workflows/release.yml`](.github/workflows/release.yml) 支持推送 `v*` 数字版本标签和手动触发。手动运行需填写已经存在的标签，例如 `v1.7.1`；标签版本必须与 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 一致。
 
 仓库的 **Settings → Secrets and variables → Actions** 使用以下名称：
 
@@ -222,8 +222,8 @@ Tauri 原生产物位于 `src-tauri/target/<target>/release/bundle/`。生成用
 
 ```sh
 git push origin main
-git tag v1.7.0
-git push origin v1.7.0
+git tag v1.7.1
+git push origin v1.7.1
 ```
 
 推送标签会启动工作流；是否构建、签名和发布成功，应查看该次 Actions 运行及 Releases 附件。

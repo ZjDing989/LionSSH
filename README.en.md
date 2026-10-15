@@ -4,7 +4,7 @@
 
 <p align="center">Manage multiple SSH connections, port tunnels, GPU monitoring, and Slurm jobs in one desktop workspace.</p>
 
-Built with **Tauri 2 + Rust + Vue 3 + TypeScript**. SSH, tunnels, monitoring, configuration storage, and credential encryption run inside the Rust application. Release packages contain no Node.js runtime or Node backend. Version 1.7.0 adds releases for multiple desktop platforms and signed updates: WebView2 on Windows, system WebKit on macOS, and WebKitGTK 4.1 on Linux.
+Built with **Tauri 2 + Rust + Vue 3 + TypeScript**. SSH, tunnels, monitoring, configuration storage, and credential encryption run inside the Rust application. Release packages contain no Node.js runtime or Node backend. Version 1.7.1 adds releases for multiple desktop platforms and signed updates: WebView2 on Windows, system WebKit on macOS, and WebKitGTK 4.1 on Linux.
 
 ## Features
 
@@ -58,23 +58,23 @@ The workspace records connection, tunnel, and recovery events. Remembered passwo
 
 **[Download Lion SSH from GitHub Releases](https://github.com/ZjDing989/LionSSH/releases)**
 
-Choose the attachment matching your system and processor. The release workflow targets the following 1.7.0 artifacts; available versions and actual build results are shown on Releases and [GitHub Actions](https://github.com/ZjDing989/LionSSH/actions/workflows/release.yml).
+Choose the attachment matching your system and processor. The release workflow targets the following 1.7.1 artifacts; available versions and actual build results are shown on Releases and [GitHub Actions](https://github.com/ZjDing989/LionSSH/actions/workflows/release.yml).
 
 | Platform | File | Installation |
 | --- | --- | --- |
-| Windows x64, multi-file portable | `Lion-SSH-1.7.0-windows-x64-portable.zip` | Extract and run `Lion SSH.exe`; keep the complete folder and its adjacent `data/` |
-| Windows x64, installer | `Lion-SSH-1.7.0-windows-x64-setup.exe` | Installs for the current user with a Start menu entry; defaults to `%LOCALAPPDATA%\Programs\Lion SSH` |
-| macOS, Apple Silicon | `Lion-SSH-1.7.0-macos-aarch64.dmg` | Open the DMG, drag the application to Applications, then launch the installed app |
-| macOS, Intel | `Lion-SSH-1.7.0-macos-x86_64.dmg` | Open the DMG, drag the application to Applications, then launch the installed app |
-| Linux x86_64, AppImage | `Lion-SSH-1.7.0-linux-x86_64.AppImage` | Make it executable and run it; keep it in a user-writable directory for built-in updates |
+| Windows x64, multi-file portable | `Lion-SSH-1.7.1-windows-x64-portable.zip` | Extract and run `Lion SSH.exe`; keep the complete folder and its adjacent `data/` |
+| Windows x64, installer | `Lion-SSH-1.7.1-windows-x64-setup.exe` | Installs for the current user with a Start menu entry; defaults to `%LOCALAPPDATA%\Programs\Lion SSH` |
+| macOS, Apple Silicon | `Lion-SSH-1.7.1-macos-aarch64.dmg` | Open the DMG, drag the application to Applications, then launch the installed app |
+| macOS, Intel | `Lion-SSH-1.7.1-macos-x86_64.dmg` | Open the DMG, drag the application to Applications, then launch the installed app |
+| Linux x86_64, AppImage | `Lion-SSH-1.7.1-linux-x86_64.AppImage` | Make it executable and run it; keep it in a user-writable directory for built-in updates |
 
 The Windows installer lets you change its destination, and upgrades retain your selected installation directory. Both Windows editions read and write the `data/` folder beside the executable. Windows 10/11 and [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) are required. The installer checks for WebView2 and downloads it if missing; portable users need an existing runtime installation.
 
 Linux needs a desktop environment with WebKitGTK 4.1. Remembering credentials also requires an unlocked desktop Secret Service, such as GNOME Keyring or a compatible KWallet service. You can connect without remembering passwords if no usable keyring is available. To launch an AppImage:
 
 ```sh
-chmod +x Lion-SSH-1.7.0-linux-x86_64.AppImage
-./Lion-SSH-1.7.0-linux-x86_64.AppImage
+chmod +x Lion-SSH-1.7.1-linux-x86_64.AppImage
+./Lion-SSH-1.7.1-linux-x86_64.AppImage
 ```
 
 **Signing and operating-system trust:** Update packages use Tauri signatures verified with the application's embedded public key. The current macOS release workflow does not configure Apple Developer ID signing or Apple notarization. An updater signature does not establish macOS platform trust, so Gatekeeper may block the first launch. After verifying that the download came from this project's Releases, follow [Apple's guidance for safely opening applications](https://support.apple.com/en-us/102445). Windows Authenticode signing is also not configured, so SmartScreen prompts are possible. See [Tauri's macOS signing documentation](https://v2.tauri.app/distribute/sign/macos/) for release signing and notarization setup.
@@ -165,15 +165,15 @@ One build creates an installer and a multi-file portable edition under `release/
 
 ```text
 release/
-├─ Lion-SSH-1.7.0-windows-x64-portable/
+├─ Lion-SSH-1.7.1-windows-x64-portable/
 │  ├─ Lion SSH.exe
 │  ├─ portable.json
 │  ├─ licenses/            # Third-party notices and licenses
 │  ├─ LICENSE.txt
 │  ├─ 使用说明.txt
 │  └─ manifest.json        # SHA256 manifest of distributed files
-├─ Lion-SSH-1.7.0-windows-x64-portable.zip
-└─ Lion-SSH-1.7.0-windows-x64-setup.exe
+├─ Lion-SSH-1.7.1-windows-x64-portable.zip
+└─ Lion-SSH-1.7.1-windows-x64-setup.exe
 ```
 
 `npm run pack` creates only the portable folder and ZIP. `npm run dist` is equivalent to `npm run dist:win`. Repackaging removes old distributed files using the previous manifest while preserving existing `data/` and extra user files. The ZIP contains only this build's distribution files. `scripts/licenses.cjs` generates license resources from locked Rust and frontend production dependencies for both editions.
@@ -205,7 +205,7 @@ Tauri writes native bundles to `src-tauri/target/<target>/release/bundle/`. Conf
 
 ## GitHub Actions releases
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) runs on numeric `v*` version tags and supports manual dispatch. Manual runs require an existing tag such as `v1.7.0`. The tag version must match `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) runs on numeric `v*` version tags and supports manual dispatch. Manual runs require an existing tag such as `v1.7.1`. The tag version must match `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 
 Set these names under repository **Settings → Secrets and variables → Actions**:
 
@@ -222,8 +222,8 @@ The workflow first creates or reuses a **draft Release** for the tag, then build
 
 ```sh
 git push origin main
-git tag v1.7.0
-git push origin v1.7.0
+git tag v1.7.1
+git push origin v1.7.1
 ```
 
 Pushing a tag starts the workflow. Check that run and its Releases attachments to establish whether building, signing, and publication succeeded.

@@ -2361,9 +2361,11 @@ mod tests {
             return;
         } // Cleanup deliberately refuses root on Linux too.
         let isolated = |script: String| {
+            // On Linux the generated home path itself starts with /tmp, so
+            // replace the original /tmp references before inserting that path.
             script
-                .replace("/home/tester", &shell_home)
                 .replace("/tmp", &shell_tmp)
+                .replace("/home/tester", &shell_home)
         };
         let scan = shell(bash, &isolated(build_storage_scan("tester").unwrap()));
         assert!(
@@ -2371,8 +2373,15 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&scan.stderr)
         );
-        let state = parse_storage_scan(&String::from_utf8(scan.stdout).unwrap(), "tester").unwrap();
-        assert_eq!(state["partial"], false);
+        let scan_stdout = String::from_utf8(scan.stdout).unwrap();
+        let scan_stderr = String::from_utf8_lossy(&scan.stderr);
+        let state = parse_storage_scan(&scan_stdout, "tester").unwrap_or_else(|error| {
+            panic!("{error}; scan stdout: {scan_stdout:?}; scan stderr: {scan_stderr:?}")
+        });
+        assert_eq!(
+            state["partial"], false,
+            "scan stdout: {scan_stdout:?}; scan stderr: {scan_stderr:?}"
+        );
         let preview = shell(bash, &isolated(build_tmp_preview()));
         let preview = parse_tmp_preview(&String::from_utf8(preview.stdout).unwrap()).unwrap();
         assert_eq!(preview["fileCount"], 6); // Two hardlinks, two symlinks, and two ordinary files.
