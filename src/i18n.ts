@@ -44,6 +44,8 @@ const translations: Record<string, string> = {
   'OpenAI 官方发布': 'Official OpenAI release',
   'SSH 密钥': 'SSH key',
   'Slurm 作业': 'Slurm jobs',
+  '调整 Slurm 卡片高度': 'Resize the Slurm card height',
+  '拖动调整高度，双击恢复默认；也可使用上下方向键': 'Drag to resize, double-click to reset, or use the up and down arrow keys',
   'Slurm 作业列表，可横向滚动': 'Slurm jobs, scroll horizontally for more columns',
   'Slurm 原因：{0}': 'Slurm reason: {0}',
   'Slurm 状态代码：{0}': 'Slurm state code: {0}',

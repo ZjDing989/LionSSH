@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, react
 import Icon from './components/Icon.vue';
 import { api as desktopApi } from './api';
 import { applyLanguage, language, message, resolveLanguage, t } from './i18n';
+import { useCardHeight } from './useCardHeight';
 import type { LanguagePreference, LanguageState } from './types';
 import type { CodexState, GpuCard, GpuSettings, HostKeyRequest, JobCancelPreview, Profile, Secrets, ServerState, ShutdownNotice, SlurmJob, SlurmScope, ThemePreference, ThemeState, TmpCleanupPreview, Tunnel, UpdateState } from './types';
 const api = window.lion ?? desktopApi;
@@ -41,6 +42,12 @@ const busy = reactive<Record<string, boolean>>({});
 const pendingSlurmScopes = reactive<Record<string, SlurmScope>>({});
 const slurmPage = ref(1);
 const slurmPageSize = 100;
+const {
+    cardElement: slurmCardElement, cardHeight: slurmCardHeight, currentHeight: slurmCurrentHeight,
+    resizing: slurmResizing, minHeight: slurmMinHeight, maxHeight: slurmMaxHeight,
+    startResize: startSlurmResize, moveResize: moveSlurmResize, finishResize: finishSlurmResize,
+    resizeKey: resizeSlurmKey, resetHeight: resetSlurmHeight,
+} = useCardHeight('lion-slurm-card-height');
 const notices = ref<{
     id: number;
     message: string | (() => string);
@@ -1077,7 +1084,7 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
           <div class="storage-footer"><span><i v-if="storageLoading" class="status-dot pending" />{{ storageLoading ? t("正在统计空间占用\u2026") : connected ? t("每 {0} 分钟自动更新", { "0": Math.round((storage?.intervalSec || 300) / 60) }) : t("等待连接") }}</span><time v-if="storage?.lastUpdated">{{ t('更新于') }} {{ timeText(storage.lastUpdated) }}</time></div>
         </section>
 
-        <section v-if="showSlurmCard" class="slurm-card card" data-testid="slurm-card" :aria-busy="slurmLoading">
+        <section v-if="showSlurmCard" :ref="element => slurmCardElement = element as HTMLElement | null" class="slurm-card card" :class="{ 'slurm-card-sized': slurmCardHeight !== null, 'slurm-card-resizing': slurmResizing }" :style="{ minHeight: `${slurmMinHeight}px`, height: slurmCardHeight !== null ? `${slurmCardHeight}px` : undefined }" data-testid="slurm-card" :aria-busy="slurmLoading">
           <div class="section-heading">
             <div class="heading-label"><span class="section-icon blue"><Icon name="activity" :size="20" /></span><h2>{{ t('Slurm 作业') }}</h2><span class="count-tag">{{ slurmLoading ? '—' : slurmJobs.length }}</span></div>
             <div class="slurm-controls">
@@ -1110,6 +1117,7 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
           </div>
           <div v-else class="slurm-empty" data-testid="slurm-empty"><Icon :name="slurm?.error ? 'info' : 'check'" :size="19" /><span>{{ slurm?.error ? t("暂时无法读取作业") : slurmScope === 'mine' ? t("该用户暂无作业") : t("当前暂无可见作业") }}</span></div>
           <div class="slurm-footer"><span>{{ slurmScope === 'mine' ? t("当前用户 {0}", { "0": selected.username }) : t("服务器允许查看的全部作业") }}<span class="slurm-footer-divider">·</span>{{ connected ? t("每 {0} 秒自动更新", { "0": slurm?.intervalSec || 30 }) : t("等待连接") }}</span><div class="slurm-footer-actions"><div v-if="slurmJobs.length > slurmPageSize" class="slurm-pagination" data-testid="slurm-pagination" role="group" :aria-label="t('作业列表分页')"><button class="icon-button previous" data-testid="slurm-prev-page" :title="t('上一页作业')" :aria-label="t('上一页作业')" :disabled="slurmPage <= 1" @click="slurmPage--"><Icon name="chevron" :size="14" /></button><span data-testid="slurm-page-number" aria-live="polite">{{ slurmPage }} / {{ slurmPageCount }} {{ t('页') }}</span><button class="icon-button" data-testid="slurm-next-page" :title="t('下一页作业')" :aria-label="t('下一页作业')" :disabled="slurmPage >= slurmPageCount" @click="slurmPage++"><Icon name="chevron" :size="14" /></button></div><time v-if="slurm?.lastUpdated">{{ t('更新于') }} {{ timeText(slurm.lastUpdated) }}</time></div></div>
+          <div class="slurm-resize-handle" data-testid="slurm-resize-handle" role="separator" tabindex="0" aria-orientation="horizontal" :aria-label="t('调整 Slurm 卡片高度')" :aria-valuemin="slurmMinHeight" :aria-valuemax="slurmMaxHeight" :aria-valuenow="slurmCurrentHeight" :title="t('拖动调整高度，双击恢复默认；也可使用上下方向键')" @pointerdown="startSlurmResize" @pointermove="moveSlurmResize" @pointerup="finishSlurmResize" @pointercancel="finishSlurmResize" @lostpointercapture="finishSlurmResize" @keydown="resizeSlurmKey" @dblclick="resetSlurmHeight"><span aria-hidden="true" /></div>
         </section>
 
         <section class="tunnel-card card"><div class="section-heading"><div class="heading-label"><span class="section-icon blue"><Icon name="exchange" :size="20" /></span><h2>{{ t('端口隧道') }}</h2><span class="count-tag">{{ selected.tunnels.length }}</span></div><button data-testid="add-tunnel" class="button secondary small" @click="openTunnel()"><Icon name="plus" :size="15" />{{ t('添加隧道') }}</button></div>
