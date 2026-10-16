@@ -13,7 +13,7 @@ const output = path.join(root, 'test-output');
   const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--allow-file-access-from-files'] });
   const errors = [];
   try {
-    const page = await browser.newPage({ viewport: { width: 1366, height: 1000 }, colorScheme: 'light' });
+    const page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1366, height: 1000 }, colorScheme: 'light' });
     page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(() => {
       const state = {

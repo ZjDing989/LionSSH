@@ -1,5 +1,5 @@
 //! Existing `data` files stay compatible, including native:v1 Windows DPAPI credentials.
-use crate::{crypto, model};
+use crate::{crypto, locale, model};
 use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
     Engine,
@@ -88,6 +88,9 @@ impl Store {
         let mut settings = Value::Object(object(read_json(&dir, FILES[3], json!({}))?, FILES[3])?);
         if !["light", "dark", "system"].contains(&settings["theme"].as_str().unwrap_or("")) {
             settings["theme"] = json!("system");
+        }
+        if !locale::PREFERENCES.contains(&settings["language"].as_str().unwrap_or("")) {
+            settings["language"] = json!("system");
         }
         let mut profiles = Vec::new();
         let mut original_profiles = HashMap::new();
@@ -240,6 +243,19 @@ impl Store {
         }
         let previous = self.settings.clone();
         self.settings["theme"] = json!(preference);
+        if let Err(error) = self.persist() {
+            self.settings = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn set_language(&mut self, preference: &str) -> Result<(), String> {
+        if !locale::PREFERENCES.contains(&preference) {
+            return Err("请选择中文、English 或跟随系统".into());
+        }
+        let previous = self.settings.clone();
+        self.settings["language"] = json!(preference);
         if let Err(error) = self.persist() {
             self.settings = previous;
             return Err(error);
@@ -490,7 +506,34 @@ mod tests {
         for name in FILES {
             assert!(fixture.0.join(name).is_file());
         }
-        assert_eq!(fixture.open().settings, json!({"theme":"system"}));
+        assert_eq!(
+            fixture.open().settings,
+            json!({"theme":"system", "language":"system"})
+        );
+    }
+
+    #[test]
+    fn language_preference_is_persisted_and_invalid_values_migrate_without_losing_extensions() {
+        let fixture = Fixture::new();
+        let mut store = fixture.open();
+        for preference in ["en", "zh", "system"] {
+            store.set_language(preference).unwrap();
+            assert_eq!(fixture.open().settings["language"], preference);
+        }
+        assert!(store.set_language("fr").is_err());
+        assert_eq!(fixture.open().settings["language"], "system");
+        for invalid in [json!("de"), json!(true), json!({}), Value::Null] {
+            fs::write(
+                fixture.0.join(FILES[3]),
+                json!({"language":invalid,"future":"retained"}).to_string(),
+            )
+            .unwrap();
+            let mut migrated = fixture.open();
+            assert_eq!(migrated.settings["language"], "system");
+            assert_eq!(migrated.settings["future"], "retained");
+            migrated.set_language("en").unwrap();
+            assert_eq!(fixture.open().settings["future"], "retained");
+        }
     }
 
     #[test]
@@ -553,6 +596,8 @@ mod tests {
         assert_eq!(store.get("saved").unwrap()["host"], "192.0.2.10");
         assert!(store.set_theme("light").is_err());
         assert_eq!(store.settings["theme"], "system");
+        assert!(store.set_language("en").is_err());
+        assert_eq!(store.settings["language"], "system");
         let mut updated = profile();
         updated["host"] = json!("192.0.2.11");
         assert!(store.save(&updated, None).is_err());

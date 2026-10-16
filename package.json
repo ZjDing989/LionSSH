@@ -1,7 +1,7 @@
 {
   "name": "lion-ssh",
-  "version": "1.8.5",
-  "description": "基于 Tauri 的多设备 SSH、隧道与显卡监测工作台",
+  "version": "1.9.0",
+  "description": "SSH connections, tunnels and server monitoring in one desktop workspace",
   "author": "Lion SSH contributors",
   "private": true,
   "scripts": {
@@ -13,7 +13,7 @@
     "prepare:licenses": "node scripts/licenses.cjs",
     "tauri": "node scripts/tauri.cjs",
     "test": "node scripts/test.cjs",
-    "test:ui": "npm run build:frontend && node scripts/slurm-ui-smoke.cjs && node scripts/ui-actions-smoke.cjs && node scripts/codex-ui-smoke.cjs && node scripts/terminal-ui-smoke.cjs",
+    "test:ui": "npm run build:frontend && node scripts/slurm-ui-smoke.cjs && node scripts/ui-actions-smoke.cjs && node scripts/codex-ui-smoke.cjs && node scripts/terminal-ui-smoke.cjs && node scripts/language-ui-smoke.cjs",
     "smoke": "node scripts/desktop-smoke.cjs",
     "smoke:data": "node scripts/data-directory-smoke.cjs",
     "pack": "node scripts/package.cjs --portable-only",

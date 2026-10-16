@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f4f6fa" />
-    <title>Lion SSH · 连接工作台</title>
+    <title>Lion SSH</title>
     <style>
       body { margin: 0; background: #f4f6fa; }
       #startup-shell { position: fixed; inset: 0; display: grid; place-content: center; justify-items: center; gap: 15px; background: radial-gradient(ellipse at 25% 15%, #e9f1ff, transparent 60%), #f4f6fa; color: #334866; font: 14px "Segoe UI", "Microsoft YaHei", sans-serif; }
@@ -18,7 +18,7 @@
   </head>
   <body>
     <div id="app"></div>
-    <div id="startup-shell" role="status" aria-live="polite"><i class="startup-ring" aria-hidden="true"></i><strong>Lion SSH</strong><span>正在准备连接工作台…</span></div>
+    <div id="startup-shell" role="status" aria-live="polite"><i class="startup-ring" aria-hidden="true"></i><strong>Lion SSH</strong><span>Loading workspace…</span></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

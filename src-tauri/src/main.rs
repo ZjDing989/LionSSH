@@ -2,6 +2,7 @@
 
 mod codex;
 mod crypto;
+mod locale;
 mod model;
 mod monitor;
 mod native_payload;
@@ -110,7 +111,11 @@ async fn lion_request(
             return Err("选择密钥的请求格式无效".into());
         }
         let selected = rfd::AsyncFileDialog::new()
-            .set_title("选择 SSH 私钥")
+            .set_title(locale::text(
+                state.resolved_language(),
+                "选择 SSH 私钥",
+                "Select an SSH private key",
+            ))
             .pick_file()
             .await;
         return Ok(selected
@@ -132,17 +137,46 @@ async fn lion_request(
     if method == "initial" {
         result["update"] = app.state::<Arc<updater::UpdateManager>>().state();
         service::apply_theme(&app, &result["theme"]);
+        apply_language(&app, &result["language"]);
     } else if method == "set-theme" {
         service::apply_theme(&app, &result);
     }
     Ok(result)
 }
 
-fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "打开软件", true, None::<&str>)?;
+fn tray_menu(app: &tauri::AppHandle, language: &str) -> tauri::Result<Menu<tauri::Wry>> {
+    let open = MenuItem::with_id(
+        app,
+        "open",
+        locale::text(language, "打开软件", "Open Lion SSH"),
+        true,
+        None::<&str>,
+    )?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "关闭软件", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &separator, &quit])?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        locale::text(language, "关闭软件", "Quit Lion SSH"),
+        true,
+        None::<&str>,
+    )?;
+    Menu::with_items(app, &[&open, &separator, &quit])
+}
+
+pub fn apply_language(app: &tauri::AppHandle, language: &Value) {
+    if let Some(tray) = app.tray_by_id("lion-tray") {
+        if let Ok(menu) = tray_menu(app, language["resolved"].as_str().unwrap_or("en")) {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
+fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let language = app
+        .try_state::<Arc<Service>>()
+        .map(|service| service.resolved_language())
+        .unwrap_or_else(locale::system_language);
+    let menu = tray_menu(app, language)?;
     let mut builder = TrayIconBuilder::with_id("lion-tray")
         .tooltip("Lion SSH")
         .menu(&menu)
@@ -317,7 +351,11 @@ fn main() {
         Ok(application) => application,
         Err(error) => {
             rfd::MessageDialog::new()
-                .set_title("Lion SSH 启动失败")
+                .set_title(locale::text(
+                    locale::system_language(),
+                    "Lion SSH 启动失败",
+                    "Lion SSH could not start",
+                ))
                 .set_description(error.to_string())
                 .set_level(rfd::MessageLevel::Error)
                 .show();

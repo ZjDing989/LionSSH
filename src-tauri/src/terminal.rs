@@ -29,6 +29,8 @@ pub struct TerminalSession {
     pub id: String,
     pub profile_id: String,
     pub title: String,
+    /// Only untouched generated titles follow language changes; custom remarks stay verbatim.
+    pub default_title_number: Option<u64>,
     pub status: String,
     pub exit_code: Option<u32>,
     pub error: Option<String>,
@@ -244,6 +246,7 @@ impl TerminalManager {
                         id: uuid::Uuid::new_v4().to_string(),
                         profile_id: profile_id.into(),
                         title: format!("终端 {number}"),
+                        default_title_number: Some(*number),
                         status: "opening".into(),
                         exit_code: None,
                         error: None,
@@ -336,6 +339,7 @@ impl TerminalManager {
         let terminal = self.get(profile_id, id)?;
         let mut state = terminal.state.lock().unwrap();
         state.session.title = title.into();
+        state.session.default_title_number = None;
         Ok(state.session.clone())
     }
 
@@ -645,6 +649,7 @@ mod tests {
                     id: "retained-terminal".into(),
                     profile_id: "server-a".into(),
                     title: "终端 1".into(),
+                    default_title_number: Some(1),
                     status: "exited".into(),
                     exit_code: Some(0),
                     error: None,
@@ -694,6 +699,7 @@ mod tests {
                 .title,
             "训练日志"
         );
+        assert_eq!(manager.list("server-a")[0].default_title_number, None);
         for invalid in ["", "   ", "a\nb", &"a".repeat(81)] {
             assert!(manager
                 .rename("server-a", "retained-terminal", invalid)

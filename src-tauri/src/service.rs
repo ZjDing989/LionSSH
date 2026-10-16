@@ -1,6 +1,6 @@
 use crate::{
     codex::CodexTool,
-    model,
+    locale, model,
     monitor::Monitor,
     ssh::{self, Connection, HostDecision},
     store::Store,
@@ -26,6 +26,7 @@ type Reply = Result<Value, String>;
 pub const PUBLIC_METHODS: &[&str] = &[
     "initial",
     "set-theme",
+    "set-language",
     "save-profile",
     "delete-profile",
     "connect",
@@ -165,6 +166,8 @@ pub struct Service {
     terminals: TerminalManager,
     theme: Mutex<String>,
     theme_preference: Mutex<Option<String>>,
+    system_language: &'static str,
+    language_preference: Mutex<String>,
     sink: Sink,
     pub quitting: AtomicBool,
     pub finished: AtomicBool,
@@ -211,6 +214,8 @@ impl Service {
         let sink: Sink = Arc::new(move |event, payload| {
             if event == "lion:theme" {
                 apply_theme(&app, &payload);
+            } else if event == "lion:language" {
+                crate::apply_language(&app, &payload);
             }
             let _ = app.emit(event, payload);
         });
@@ -219,6 +224,11 @@ impl Service {
 
     pub fn open(directory: PathBuf, resolved: &str, sink: Sink) -> Arc<Self> {
         let store = Store::open(directory.clone()).ok();
+        let language_preference = store
+            .as_ref()
+            .and_then(|store| store.settings["language"].as_str())
+            .unwrap_or("system")
+            .to_owned();
         let states = store
             .as_ref()
             .map(|store| {
@@ -245,6 +255,8 @@ impl Service {
             terminals: TerminalManager::new(),
             theme: Mutex::new(resolved.into()),
             theme_preference: Mutex::new(None),
+            system_language: locale::system_language(),
+            language_preference: Mutex::new(language_preference),
             sink,
             quitting: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -256,6 +268,10 @@ impl Service {
         let mut guard = self.store.lock().await;
         if guard.is_none() {
             let store = Store::open(self.directory.clone())?;
+            *self.language_preference.lock().unwrap() = store.settings["language"]
+                .as_str()
+                .unwrap_or("system")
+                .into();
             let mut states = self.states.lock().unwrap();
             for profile in &store.profiles {
                 if let Some(id) = profile["id"].as_str() {
@@ -645,6 +661,18 @@ impl Service {
         json!({"preference":preference,"resolved":resolved})
     }
 
+    pub fn resolved_language(&self) -> &'static str {
+        locale::resolve(
+            &self.language_preference.lock().unwrap(),
+            self.system_language,
+        )
+    }
+
+    pub fn language_state(&self) -> Value {
+        let preference = self.language_preference.lock().unwrap().clone();
+        json!({"resolved":locale::resolve(&preference, self.system_language), "preference":preference})
+    }
+
     pub async fn request(self: &Arc<Self>, method: &str, args: Vec<Value>) -> Reply {
         if method == "shutdown" {
             self.shutdown().await;
@@ -665,8 +693,33 @@ impl Service {
             let states: Vec<_> = self.states.lock().unwrap().values().cloned().collect();
             let keys: Vec<_> = self.host_keys.lock().unwrap().values().cloned().collect();
             return Ok(
-                json!({"profiles":profiles,"states":states,"version":env!("CARGO_PKG_VERSION"),"theme":self.theme_state().await,"shutdown":Value::Null,"pendingHostKeys":keys}),
+                json!({"profiles":profiles,"states":states,"version":env!("CARGO_PKG_VERSION"),"theme":self.theme_state().await,"language":self.language_state(),"shutdown":Value::Null,"pendingHostKeys":keys}),
             );
+        }
+        if method == "set-language" {
+            let preference = if args.len() == 1 {
+                args[0]
+                    .as_str()
+                    .filter(|preference| locale::PREFERENCES.contains(preference))
+            } else {
+                None
+            }
+            .ok_or_else(|| {
+                locale::text(
+                    self.resolved_language(),
+                    "请选择中文、English 或跟随系统",
+                    "Choose Chinese, English, or Follow system",
+                )
+                .to_owned()
+            })?;
+            // Keep the store lock through the cached state/event update so concurrent
+            // language requests cannot publish a preference older than the disk commit.
+            let mut store = self.store.lock().await;
+            store.as_mut().unwrap().set_language(preference)?;
+            *self.language_preference.lock().unwrap() = preference.into();
+            let language = self.language_state();
+            (self.sink)("lion:language", language.clone());
+            return Ok(language);
         }
         if method == "set-theme" || method == "native-theme" {
             let theme = string_argument(&args, 0, "主题")?;
@@ -1076,7 +1129,7 @@ impl Service {
         self.terminals.shutdown().await;
         (self.sink)(
             "lion:shutdown",
-            json!({"phase":"closing","message":"正在关闭隧道和服务器连接…"}),
+            json!({"phase":"closing","message":locale::text(self.resolved_language(), "正在关闭隧道和服务器连接…", "Closing tunnels and SSH connections…")}),
         );
         let ids: Vec<_> = self.devices.lock().unwrap().keys().cloned().collect();
         for id in ids {
@@ -1144,6 +1197,64 @@ pub fn apply_theme(app: &AppHandle, theme: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn language_changes_are_validated_persisted_and_emitted_after_commit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&events);
+        let service = Service::open(
+            temporary.path().to_path_buf(),
+            "light",
+            Arc::new(move |event, value| {
+                recorded.lock().unwrap().push((event.to_owned(), value));
+            }),
+        );
+        let initial = service.request("initial", vec![]).await.unwrap();
+        assert_eq!(initial["language"]["preference"], "system");
+        for preference in ["en", "zh", "system"] {
+            let language = service
+                .request("set-language", vec![json!(preference)])
+                .await
+                .unwrap();
+            assert_eq!(language["preference"], preference);
+            assert_eq!(
+                language["resolved"],
+                locale::resolve(preference, service.system_language)
+            );
+            assert_eq!(
+                Store::open(temporary.path().to_path_buf())
+                    .unwrap()
+                    .settings["language"],
+                preference
+            );
+            assert_eq!(
+                events.lock().unwrap().last().unwrap(),
+                &("lion:language".into(), language)
+            );
+        }
+        let count = events.lock().unwrap().len();
+        for invalid in [
+            vec![],
+            vec![json!("fr")],
+            vec![json!(false)],
+            vec![json!("en"), json!("zh")],
+        ] {
+            assert!(service.request("set-language", invalid).await.is_err());
+        }
+        assert_eq!(service.language_state()["preference"], "system");
+        assert_eq!(events.lock().unwrap().len(), count);
+        service
+            .request("set-language", vec![json!("en")])
+            .await
+            .unwrap();
+        let reopened = Service::open(temporary.path().to_path_buf(), "light", Arc::new(|_, _| {}));
+        assert_eq!(
+            reopened.language_state(),
+            json!({"preference":"en", "resolved":"en"})
+        );
+    }
+
     #[test]
     fn codex_results_from_old_connections_cannot_overwrite_reconnected_or_removed_devices() {
         let temporary = tempfile::tempdir().unwrap();

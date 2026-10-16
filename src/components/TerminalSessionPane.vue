@@ -4,6 +4,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import type { LionApi, TerminalSession } from '../types';
+import { message, t } from '../i18n';
 
 const props = defineProps<{
   api: LionApi | undefined;
@@ -17,7 +18,8 @@ const surface = ref<HTMLDivElement | null>(null);
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const writable = computed(() => props.connected && props.session.status === 'running' && !props.disabled);
 const ended = computed(() => props.session.status === 'exited' || props.session.status === 'error');
-const notice = computed(() => props.session.status === 'error' ? props.session.error || '终端连接异常，可新建终端重试。' : props.session.status === 'exited' ? props.session.exitCode === null ? '终端会话已结束。' : `终端会话已结束，退出码 ${props.session.exitCode}。` : !props.connected ? '连接已断开，终端内容已保留。重新连接后可新建终端。' : props.session.status === 'opening' ? '正在连接终端…' : '');
+const notice = computed(() => props.session.status === 'error' ? props.session.error ? message(props.session.error) : t('终端连接异常，可新建终端重试。') : props.session.status === 'exited' ? props.session.exitCode === null ? t('终端会话已结束。') : t('终端会话已结束，退出码 {code}。', { code: props.session.exitCode }) : !props.connected ? t('连接已断开，终端内容已保留。重新连接后可新建终端。') : props.session.status === 'opening' ? t('正在连接终端…') : '');
+const sessionTitle = computed(() => props.session.defaultTitleNumber != null ? t('终端 {number}', { number: props.session.defaultTitleNumber }) : props.session.title);
 
 let terminal: Terminal | undefined;
 let fitAddon: FitAddon | undefined;
@@ -115,7 +117,7 @@ async function poll() {
   try {
     const result = await props.api.readTerminal(props.session.profileId, props.session.id, cursor);
     if (disposed) return;
-    if (result.startCursor > cursor) await renderBytes(new TextEncoder().encode('\r\n\x1b[2m[较早的输出已超出缓冲范围]\x1b[0m\r\n'));
+    if (result.startCursor > cursor) await renderBytes(new TextEncoder().encode(`\r\n\x1b[2m[${t('较早的输出已超出缓冲范围')}]\x1b[0m\r\n`));
     const data = decodeBytes(result.data);
     await renderBytes(data);
     if (disposed) return;
@@ -218,7 +220,7 @@ onUnmounted(() => {
 
 <template>
   <div class="terminal-session-panel" role="tabpanel" :data-terminal-id="session.id">
-    <div ref="surface" class="terminal-surface" data-testid="terminal-surface" :data-terminal-id="session.id" :aria-label="`终端 ${session.title}`" @contextmenu.capture="terminalContextMenu" @mousedown.capture="terminalRightButton" @mouseup.capture="terminalRightButton" />
+    <div ref="surface" class="terminal-surface" data-testid="terminal-surface" :data-terminal-id="session.id" :aria-label="t('终端 {title}', { title: sessionTitle })" @contextmenu.capture="terminalContextMenu" @mousedown.capture="terminalRightButton" @mouseup.capture="terminalRightButton" />
     <div v-if="notice" class="terminal-session-notice" :class="{ error: session.status === 'error', ended }" role="status">{{ notice }}</div>
   </div>
 </template>

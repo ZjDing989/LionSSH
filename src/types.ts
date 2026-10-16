@@ -126,6 +126,7 @@ export interface TerminalSession {
   id: string;
   profileId: string;
   title: string;
+  defaultTitleNumber?: number | null;
   status: 'opening' | 'running' | 'exited' | 'error';
   exitCode: number | null;
   error: string | null;
@@ -177,6 +178,8 @@ export interface Secrets { password?: string; passphrase?: string; remember?: bo
 
 export type ThemePreference = 'light' | 'dark' | 'system';
 export interface ThemeState { preference: ThemePreference; resolved: 'light' | 'dark' }
+export type LanguagePreference = 'system' | 'zh' | 'en';
+export interface LanguageState { preference: LanguagePreference; resolved: 'zh' | 'en' }
 export interface ShutdownNotice { phase: 'closing'; message: string }
 
 export interface UpdateState {
@@ -198,13 +201,16 @@ export interface UpdateState {
 
 export interface LionApi {
   readonly initialTheme?: ThemeState;
-  getInitial(): Promise<{ profiles: Profile[]; states: ServerState[]; version: string; theme?: ThemeState; shutdown?: ShutdownNotice | null; pendingHostKeys?: HostKeyRequest[]; update?: UpdateState }>;
+  readonly initialLanguage?: LanguageState;
+  getInitial(): Promise<{ profiles: Profile[]; states: ServerState[]; version: string; theme?: ThemeState; language?: LanguageState; shutdown?: ShutdownNotice | null; pendingHostKeys?: HostKeyRequest[]; update?: UpdateState }>;
   getUpdateState?(): Promise<UpdateState>;
   checkUpdate?(): Promise<UpdateState>;
   installUpdate?(): Promise<void>;
   openUpdateDownload?(): Promise<void>;
   onUpdate?(callback: (state: UpdateState) => void): () => void;
   setTheme(preference: ThemePreference): Promise<ThemeState>;
+  setLanguage?(preference: LanguagePreference): Promise<LanguageState>;
+  onLanguage?(callback: (language: LanguageState) => void): () => void;
   saveProfile(profile: Profile, secrets?: Secrets): Promise<Profile>;
   deleteProfile(id: string): Promise<void>;
   connect(id: string, secrets?: Secrets): Promise<void>;

@@ -10,7 +10,7 @@ const output = path.join(root, 'test-output');
 (async () => {
   await fs.mkdir(output, { recursive: true });
   const browser = await chromium.launch({ headless: true, channel: 'chrome', args: ['--allow-file-access-from-files'] });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+  const page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1440, height: 1100 } });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
@@ -32,7 +32,7 @@ const output = path.join(root, 'test-output');
       window.mock = { calls, state, hostTrust: [], expire: false, failPriority: false, update, setUpdate: patch => { Object.assign(update, patch); onUpdate(clone(update)); }, emit: () => onState(clone(state)), requestHostKey: () => { state.status = 'awaiting-trust'; onState(clone(state)); onHostKey(clone(hostKey)); }, failBackend: () => onBackendError({ message: '本地连接服务已退出，请重新启动应用。' }) };
       const backend = {
         getInitial: async () => {
-          if (window.mock.eventRegistrations.length !== 6) throw Error('Initial snapshot requested before all native listeners were installed');
+          if (window.mock.eventRegistrations.length !== 7) throw Error('Initial snapshot requested before all native listeners were installed');
           const staleSnapshot = clone(state);
           staleSnapshot.storage.homeBytes = 1;
           // A live state received while initial is in flight must beat its snapshot.
@@ -64,7 +64,7 @@ const output = path.join(root, 'test-output');
       // Exercise the production Tauri bridge without starting SSH or a native process.
       const callbacks = new Map();
       const unlisteners = new Map();
-      const eventMethods = { 'lion:state': 'onState', 'lion:theme': 'onTheme', 'lion:host-key': 'onHostKey', 'lion:shutdown': 'onShutdown', 'lion:backend-error': 'onBackendError', 'lion:update': 'onUpdate' };
+      const eventMethods = { 'lion:state': 'onState', 'lion:theme': 'onTheme', 'lion:language': 'onLanguage', 'lion:host-key': 'onHostKey', 'lion:shutdown': 'onShutdown', 'lion:backend-error': 'onBackendError', 'lion:update': 'onUpdate' };
       let nextId = 1;
       window.mock.eventRegistrations = [];
       window.isTauri = true;

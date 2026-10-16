@@ -46,6 +46,8 @@ function createTauriApi(): LionApi {
     openUpdateDownload: () => request('open-update-download'),
     onUpdate: callback => subscribe('lion:update', callback),
     setTheme: preference => request('set-theme', preference),
+    setLanguage: preference => request('set-language', preference),
+    onLanguage: callback => subscribe('lion:language', callback),
     saveProfile: (profile, secrets) => request('save-profile', profile, secrets),
     deleteProfile: id => request('delete-profile', id),
     connect: (id, secrets) => request('connect', id, secrets),

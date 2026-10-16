@@ -26,7 +26,7 @@ async function verifyContextMenuTarget(target) {
 (async () => {
   await fs.mkdir(output, { recursive: true });
   const browser = await chromium.launch({ headless: true, channel: 'chrome', args: ['--allow-file-access-from-files'] });
-  const page = await browser.newPage({ viewport: { width: 1380, height: 950 } });
+  const page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1380, height: 950 } });
   const errors = [];
   const cspErrors = [];
   page.on('pageerror', error => errors.push(error.message));
