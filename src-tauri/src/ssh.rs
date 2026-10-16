@@ -1775,10 +1775,16 @@ mod tests {
             } else if command == b"input-early-eof" {
                 session.eof(channel)?;
             }
-            if command == b"input-duplex" || command == b"input-overflow" {
+            if command == b"input-duplex" {
                 // More than the client's default 2 MiB receive window;
                 // sending must continue while the client uploads its file.
                 session.data(channel, vec![b'x'; 3 * 1024 * 1024])?;
+            } else if command == b"input-overflow" {
+                // Exceed this test's 100-byte output limit without exhausting
+                // the channel window: the client deliberately stops reading,
+                // and russh's test server defers CLOSE behind queued output.
+                // The duplex fixture above covers receive-window pressure.
+                session.data(channel, vec![b'x'; 4096])?;
             }
             Ok(())
         }
