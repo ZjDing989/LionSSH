@@ -339,7 +339,7 @@ button { border: 0; }
 .gpu-metric-label { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 3px 8px; line-height: 1.5; }
 .gpu-metrics b { font-weight: 500; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .gpu-meter { height: 4px; border-radius: 3px; background: #e9eef5; overflow: hidden; margin-top: 5px; }
-.gpu-meter > span { display: block; height: 100%; border-radius: inherit; transition: width .6s cubic-bezier(.4, 0, .2, 1); }
+.gpu-meter > span { display: block; height: 100%; border-radius: inherit; transition: width 1.5s cubic-bezier(.22, 1, .36, 1); }
 .utilization-meter > span { background: #6b99df; }
 .memory-meter > span { background: #aa80cd; }
 .gpu-meter.unknown { background: repeating-linear-gradient(135deg, #e9eef5 0 4px, #dce3ed 4px 6px); }
