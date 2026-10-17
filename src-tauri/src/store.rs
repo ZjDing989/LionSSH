@@ -226,14 +226,52 @@ impl Store {
         self.get(id)?;
         let previous_profiles = self.profiles.clone();
         let previous_secrets = self.secrets.clone();
+        let previous_settings = self.settings.clone();
         self.profiles.retain(|profile| profile["id"] != id);
         self.secrets.remove(id);
+        if self.settings.get("connectedProfileIds").is_some() {
+            self.settings["connectedProfileIds"] = json!(self.connected_profile_ids());
+        }
         if let Err(error) = self.persist() {
             self.profiles = previous_profiles;
             self.secrets = previous_secrets;
+            self.settings = previous_settings;
             return Err(error);
         }
         self.original_profiles.remove(id);
+        Ok(())
+    }
+
+    pub fn connected_profile_ids(&self) -> Vec<String> {
+        let saved = self.settings["connectedProfileIds"].as_array();
+        self.profiles
+            .iter()
+            .filter_map(|profile| {
+                let id = profile["id"].as_str()?;
+                saved
+                    .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(id)))
+                    .then(|| id.to_owned())
+            })
+            .collect()
+    }
+
+    pub fn set_connection_state(&mut self, id: &str, connected: bool) -> Result<(), String> {
+        self.get(id)?;
+        let mut ids = self.connected_profile_ids();
+        if ids.iter().any(|saved| saved == id) == connected {
+            return Ok(());
+        }
+        if connected {
+            ids.push(id.to_owned());
+        } else {
+            ids.retain(|saved| saved != id);
+        }
+        let previous = self.settings.clone();
+        self.settings["connectedProfileIds"] = json!(ids);
+        if let Err(error) = self.persist() {
+            self.settings = previous;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -513,6 +551,40 @@ mod tests {
     }
 
     #[test]
+    fn connected_servers_survive_reopen_and_are_removed_with_profiles() {
+        let fixture = Fixture::new();
+        let mut store = fixture.open();
+        store.save(&profile(), None).unwrap();
+        assert!(store.connected_profile_ids().is_empty());
+        store.set_connection_state("saved", true).unwrap();
+        store.set_connection_state("saved", true).unwrap();
+        assert_eq!(fixture.open().connected_profile_ids(), vec!["saved"]);
+        assert_eq!(store.settings["connectedProfileIds"], json!(["saved"]));
+        store.set_connection_state("saved", false).unwrap();
+        assert!(fixture.open().connected_profile_ids().is_empty());
+        store.set_connection_state("saved", true).unwrap();
+        store.remove("saved").unwrap();
+        assert!(fixture.open().connected_profile_ids().is_empty());
+        assert_eq!(fixture.open().settings["connectedProfileIds"], json!([]));
+        assert!(store.set_connection_state("missing", true).is_err());
+    }
+
+    #[test]
+    fn stale_or_malformed_remembered_connections_do_not_select_other_profiles() {
+        let fixture = Fixture::new();
+        let mut store = fixture.open();
+        store.save(&profile(), None).unwrap();
+        store.settings["connectedProfileIds"] = json!(["missing", 42, "saved", "saved"]);
+        store.persist().unwrap();
+        assert_eq!(fixture.open().connected_profile_ids(), vec!["saved"]);
+        for invalid in [Value::Null, json!(true), json!("saved"), json!({})] {
+            store.settings["connectedProfileIds"] = invalid;
+            store.persist().unwrap();
+            assert!(fixture.open().connected_profile_ids().is_empty());
+        }
+    }
+
+    #[test]
     fn language_preference_is_persisted_and_invalid_values_migrate_without_losing_extensions() {
         let fixture = Fixture::new();
         let mut store = fixture.open();
@@ -589,11 +661,15 @@ mod tests {
         let fixture = Fixture::new();
         let mut store = fixture.open();
         store.save(&profile(), None).unwrap();
+        store.set_connection_state("saved", true).unwrap();
         let previous = fs::read(fixture.0.join(FILES[0])).unwrap();
         fs::remove_file(fixture.0.join(FILES[3])).unwrap();
         fs::create_dir(fixture.0.join(FILES[3])).unwrap();
         assert!(store.remove("saved").is_err());
         assert_eq!(store.get("saved").unwrap()["host"], "192.0.2.10");
+        assert_eq!(store.connected_profile_ids(), vec!["saved"]);
+        assert!(store.set_connection_state("saved", false).is_err());
+        assert_eq!(store.connected_profile_ids(), vec!["saved"]);
         assert!(store.set_theme("light").is_err());
         assert_eq!(store.settings["theme"], "system");
         assert!(store.set_language("en").is_err());

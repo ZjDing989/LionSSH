@@ -509,7 +509,9 @@ function cardLabel(card: GpuCard): string {
     return t("未知");
 }
 function numberText(value: number | null): string { return value === null ? '—' : value.toLocaleString(); }
-function memoryPercent(card: GpuCard): number { return card.memoryUsedMiB === null || !card.memoryTotalMiB ? 0 : Math.min(100, card.memoryUsedMiB / card.memoryTotalMiB * 100); }
+function metricPercent(value: number | null): number | null { return value === null || !Number.isFinite(value) ? null : Math.max(0, Math.min(100, value)); }
+function memoryPercent(card: GpuCard): number | null { return card.memoryUsedMiB === null || card.memoryTotalMiB === null || card.memoryTotalMiB <= 0 ? null : metricPercent(card.memoryUsedMiB / card.memoryTotalMiB * 100); }
+function percentText(value: number | null): string { return value === null ? '—' : `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`; }
 function memoryTotal(card: GpuCard): string { return card.memoryTotalMiB === null ? '—' : (card.memoryTotalMiB / 1024).toFixed(1); }
 function timestamp(value?: number | string | null): number {
     if (!value)
@@ -1073,7 +1075,23 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
           <div v-if="gpu?.error" class="gpu-warning"><Icon name="alert" :size="16" />{{ message(gpu.error) }}<span v-if="hasGpuSample"> {{ t('· 当前展示上次结果') }}</span></div>
           <div class="gpu-bottom"><div class="gpu-rule-note"><i class="status-dot" :class="gpuFresh ? 'positive' : 'neutral'" /><span>{{ gpuFresh ? t("采样正常") : hasGpuSample ? t("结果待更新") : t("尚无显卡数据") }}</span><span class="rule-divider">·</span><button class="text-button muted" @click="showGpuRules = !showGpuRules">{{ t('空闲判定规则') }}<Icon name="down" :size="12" :class="{ rotated: showGpuRules }" /></button></div><button class="text-button" :disabled="!gpu?.cards.length" @click="expandedGpu = !expandedGpu">{{ expandedGpu ? t("收起显卡详情") : t("查看显卡详情") }}<Icon name="down" :size="14" :class="{ rotated: expandedGpu }" /></button></div>
           <form v-if="showGpuRules" class="gpu-rules" @submit.prevent="applyGpu(gpuRules)"><label>{{ t('利用率 ≤') }}<span><input v-model.number="gpuRules.idleUtil" type="number" min="0" max="100" required /> %</span></label><label>{{ t('已用显存 ≤') }}<span><input v-model.number="gpuRules.idleMemoryMiB" type="number" min="0" max="131072" required /> MiB</span></label><label>{{ t('连续确认') }}<span><input v-model.number="gpuRules.stableSamples" type="number" min="1" max="10" required /> {{ t('次') }}</span></label><div class="rule-help">{{ t('同时要求没有计算进程。显示进程的少量占用允许存在。') }}</div><button class="button secondary small" type="submit" :disabled="busy.gpuSettings">{{ t('保存规则') }}</button></form>
-          <div v-if="expandedGpu && gpu?.cards.length" class="gpu-detail-grid"><div v-for="card in gpu.cards" :key="card.uuid || card.index" class="gpu-detail" :class="{ idle: card.idle && gpuFresh }"><div class="gpu-detail-heading"><span>GPU {{ card.index }}</span><span class="mini-badge" :class="card.idle && gpuFresh ? 'positive' : card.idle ? 'neutral' : 'pending'">{{ cardLabel(card) }}</span></div><strong>{{ card.name }}</strong><div class="gpu-metrics"><span>{{ t('利用率') }} <b>{{ numberText(card.utilization) }}%</b></span><span>{{ t('显存') }} <b>{{ numberText(card.memoryUsedMiB) }} MiB</b></span></div><div class="memory-meter"><span :style="{ width: `${memoryPercent(card)}%` }" /></div><small>{{ t('{count} 个计算进程 · 总显存 {memory} GiB', { count: processCount(card), memory: memoryTotal(card) }) }}</small></div></div>
+          <div v-if="expandedGpu && gpu?.cards.length" class="gpu-detail-grid">
+            <div v-for="card in gpu.cards" :key="card.uuid || card.index" class="gpu-detail" :class="{ idle: card.idle && gpuFresh }">
+              <div class="gpu-detail-heading"><span>GPU {{ card.index }}</span><span class="mini-badge" :class="card.idle && gpuFresh ? 'positive' : card.idle ? 'neutral' : 'pending'">{{ cardLabel(card) }}</span></div>
+              <strong>{{ card.name }}</strong>
+              <div class="gpu-metrics">
+                <div class="gpu-metric utilization-metric">
+                  <div class="gpu-metric-label"><span>{{ t('GPU 利用率') }}</span><b>{{ percentText(metricPercent(card.utilization)) }}</b></div>
+                  <div class="gpu-meter utilization-meter" data-testid="gpu-utilization-meter" role="progressbar" :aria-label="t('GPU 利用率')" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="metricPercent(card.utilization) ?? undefined" :aria-valuetext="metricPercent(card.utilization) === null ? t('未知') : percentText(metricPercent(card.utilization))" :class="{ unknown: metricPercent(card.utilization) === null }"><span :style="{ width: `${metricPercent(card.utilization) ?? 0}%` }" /></div>
+                </div>
+                <div class="gpu-metric memory-metric">
+                  <div class="gpu-metric-label"><span>{{ t('显存占用') }}</span><b>{{ numberText(card.memoryUsedMiB) }} MiB<span v-if="memoryPercent(card) !== null"> · {{ percentText(memoryPercent(card)) }}</span></b></div>
+                  <div class="gpu-meter memory-meter" data-testid="gpu-memory-meter" role="progressbar" :aria-label="t('显存占用')" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="memoryPercent(card) ?? undefined" :aria-valuetext="memoryPercent(card) === null ? t('未知') : `${numberText(card.memoryUsedMiB)} MiB · ${percentText(memoryPercent(card))}`" :class="{ unknown: memoryPercent(card) === null }"><span :style="{ width: `${memoryPercent(card) ?? 0}%` }" /></div>
+                </div>
+              </div>
+              <small>{{ t('{count} 个计算进程 · 总显存 {memory} GiB', { count: processCount(card), memory: memoryTotal(card) }) }}</small>
+            </div>
+          </div>
         </section>
 
         <section class="storage-card card" data-testid="storage-card" :aria-busy="storageLoading">

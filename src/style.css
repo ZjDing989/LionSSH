@@ -334,11 +334,15 @@ button { border: 0; }
 .mini-badge.positive { background: #eaf5ef; }
 .mini-badge.pending { background: #f7f1e6; }
 .gpu-detail > strong { display: block; color: var(--text-secondary); font-size: 12px; font-weight: 600; margin-top: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.gpu-metrics { display: flex; gap: 8px; flex-wrap: wrap; justify-content: space-between; color: var(--text-subtle); font-size: 10px; margin-top: 14px; }
-.gpu-metrics b { font-weight: 500; color: var(--text-secondary); margin-left: 2px; }
-.memory-meter { height: 3px; border-radius: 3px; background: #e9eef5; overflow: hidden; margin-top: 9px; }
-.memory-meter span { display: block; height: 100%; background: #a9bde0; min-width: 2px; border-radius: 3px; }
-.gpu-detail.idle .memory-meter span { background: #8abdab; }
+.gpu-metrics { display: grid; gap: 11px; color: var(--text-subtle); font-size: 10px; margin-top: 14px; }
+.gpu-metric { min-width: 0; }
+.gpu-metric-label { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 3px 8px; line-height: 1.5; }
+.gpu-metrics b { font-weight: 500; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.gpu-meter { height: 4px; border-radius: 3px; background: #e9eef5; overflow: hidden; margin-top: 5px; }
+.gpu-meter > span { display: block; height: 100%; border-radius: inherit; }
+.utilization-meter > span { background: #6b99df; }
+.memory-meter > span { background: #aa80cd; }
+.gpu-meter.unknown { background: repeating-linear-gradient(135deg, #e9eef5 0 4px, #dce3ed 4px 6px); }
 .gpu-detail > small { display: block; margin-top: 10px; font-size: 9px; color: var(--text-subtle); line-height: 1.5; }
 .slurm-detect-note { width: 100%; display: flex; align-items: center; gap: 7px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--text-secondary); font-size: 11px; min-width: 0; }
 .slurm-detect-note small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-subtle); font-size: 10px; }
@@ -643,9 +647,10 @@ button { border: 0; }
 :root[data-theme='dark'] .gpu-detail { background: #253045; }
 :root[data-theme='dark'] .gpu-detail.idle { border-color: #3c6356; background: linear-gradient(140deg, #263e37, #25352f); }
 :root[data-theme='dark'] :is(.gpu-detail > strong, .gpu-metrics b) { color: var(--text-secondary); }
-:root[data-theme='dark'] .memory-meter { background: #40506a; }
-:root[data-theme='dark'] .memory-meter span { background: #96b1e3; }
-:root[data-theme='dark'] .gpu-detail.idle .memory-meter span { background: #90cbb4; }
+:root[data-theme='dark'] .gpu-meter { background: #40506a; }
+:root[data-theme='dark'] .utilization-meter > span { background: #86b4f4; }
+:root[data-theme='dark'] .memory-meter > span { background: #c59ae9; }
+:root[data-theme='dark'] .gpu-meter.unknown { background: repeating-linear-gradient(135deg, #40506a 0 4px, #53657f 4px 6px); }
 :root[data-theme='dark'] .gpu-detail > small { color: var(--text-subtle); }
 :root[data-theme='dark'] .slurm-scope button.active { color: var(--blue); background: #3b4d6b; box-shadow: 0 2px 8px #00000022; }
 :root[data-theme='dark'] .slurm-warning { background: #443c2d; }

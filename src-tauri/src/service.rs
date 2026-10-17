@@ -163,6 +163,7 @@ pub struct Service {
     secrets: Mutex<HashMap<String, Value>>,
     host_keys: Mutex<HashMap<String, Value>>,
     operations: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    startup_restored: AsyncMutex<bool>,
     terminals: TerminalManager,
     theme: Mutex<String>,
     theme_preference: Mutex<Option<String>>,
@@ -252,6 +253,7 @@ impl Service {
             secrets: Mutex::new(HashMap::new()),
             host_keys: Mutex::new(HashMap::new()),
             operations: Mutex::new(HashMap::new()),
+            startup_restored: AsyncMutex::new(false),
             terminals: TerminalManager::new(),
             theme: Mutex::new(resolved.into()),
             theme_preference: Mutex::new(None),
@@ -289,6 +291,115 @@ impl Service {
             .as_ref()
             .ok_or("配置未就绪")?
             .get(id)
+    }
+
+    fn operation_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
+        self.operations
+            .lock()
+            .unwrap()
+            .entry(id.to_owned())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    async fn restore_connections(self: &Arc<Self>) {
+        let mut restored = self.startup_restored.lock().await;
+        if *restored {
+            return;
+        }
+        // Run after the UI subscribes and asks for its initial snapshot, so any
+        // credential errors or new host-key confirmations remain visible.
+        let ids = self
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .connected_profile_ids();
+        for id in ids {
+            let lock = self.operation_lock(&id);
+            let _operation = lock.lock().await;
+            if self.quitting.load(Ordering::SeqCst) {
+                break;
+            }
+            // Recheck after acquiring the operation lock: an earlier manual
+            // disconnect or profile edit may have changed restore eligibility.
+            let eligible = {
+                let store = self.store.lock().await;
+                let store = store.as_ref().unwrap();
+                store.connected_profile_ids().contains(&id)
+                    && store.get(&id).is_ok_and(|profile| {
+                        profile["authType"] == "key"
+                            || store.read_secret(&id).map_or(true, |secret| {
+                                secret["password"]
+                                    .as_str()
+                                    .is_some_and(|password| !password.is_empty())
+                            })
+                    })
+            };
+            // Saved but unreadable credentials still reach the normal error
+            // reporting path; accounts without a saved password stay offline.
+            if !eligible {
+                continue;
+            }
+            if let Err(error) = self.start_connection(&id, None).await {
+                self.status(&id, "error", Some(&error));
+                self.event(&id, "warning", &error);
+            }
+        }
+        *restored = true;
+    }
+
+    async fn forget_connection(&self, id: &str) -> Result<(), String> {
+        let mut store = self.store.lock().await;
+        store.as_mut().unwrap().set_connection_state(id, false)?;
+        // Share the store lock with successful authentication: a late success
+        // cannot re-add a server after the user has explicitly disconnected it.
+        if let Some(device) = self.devices.lock().unwrap().get(id) {
+            device.desired.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    async fn start_connection(
+        self: &Arc<Self>,
+        id: &str,
+        supplied: Option<&Value>,
+    ) -> Result<(), String> {
+        let existing = self.devices.lock().unwrap().get(id).cloned();
+        if existing.is_some_and(|device| device.desired.load(Ordering::SeqCst)) {
+            return Ok(());
+        }
+        self.disconnect(id).await?;
+        let profile = self.profile(id).await?;
+        let secrets = self.credentials(&profile, supplied).await?;
+        if self.quitting.load(Ordering::SeqCst) {
+            return Err("应用正在关闭".into());
+        }
+        let device = Arc::new(Device {
+            id: id.to_owned(),
+            profile: Mutex::new(profile),
+            secrets: Mutex::new(secrets),
+            desired: AtomicBool::new(true),
+            cancel: CancellationToken::new(),
+            trust: Mutex::new(None),
+            connection: Mutex::new(None),
+            monitor: Mutex::new(None),
+            codex: Mutex::new(None),
+            codex_generation: Mutex::new(0),
+            task: Mutex::new(None),
+        });
+        self.devices
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), device.clone());
+        self.status(id, "connecting", None);
+        let owner = self.clone();
+        let worker = device.clone();
+        *device.task.lock().unwrap() = Some(tokio::spawn(async move {
+            owner.run_device(worker).await;
+        }));
+        Ok(())
     }
     fn update_state(&self, id: &str, change: impl FnOnce(&mut Value)) {
         let value = {
@@ -435,9 +546,21 @@ impl Service {
             let connection = tokio::select! { _ = device.cancel.cancelled() => break, result = Connection::connect(profile.clone(),secrets,trusted,self.sink_for(&device),receiver) => result };
             let failure = match connection {
                 Ok(connection) => {
-                    if !self.current(&device) {
+                    let remembered = {
+                        let mut store = self.store.lock().await;
+                        self.current(&device).then(|| {
+                            store
+                                .as_mut()
+                                .unwrap()
+                                .set_connection_state(&device.id, true)
+                        })
+                    };
+                    if remembered.is_none() || !self.current(&device) {
                         connection.close().await;
                         break;
+                    }
+                    if let Some(Err(error)) = remembered {
+                        self.event(&device.id, "warning", &error);
                     }
                     *device.connection.lock().unwrap() = Some(connection.clone());
                     let generation = {
@@ -689,6 +812,7 @@ impl Service {
         }
         self.ensure_store().await?;
         if method == "initial" {
+            self.restore_connections().await;
             let profiles = self.store.lock().await.as_ref().unwrap().public_profiles();
             let states: Vec<_> = self.states.lock().unwrap().values().cloned().collect();
             let keys: Vec<_> = self.host_keys.lock().unwrap().values().cloned().collect();
@@ -763,6 +887,7 @@ impl Service {
                     .any(|key| old[key] != input[key])
             });
             if changed {
+                self.forget_connection(&id).await?;
                 self.disconnect(&id).await?;
                 self.secrets.lock().unwrap().remove(&id);
             }
@@ -995,41 +1120,17 @@ impl Service {
         let profile = self.profile(&id).await?;
         match method {
             "connect" => {
-                let existing = self.devices.lock().unwrap().get(&id).cloned();
-                if existing.is_some_and(|device| device.desired.load(Ordering::SeqCst)) {
-                    return Ok(Value::Null);
-                }
-                self.disconnect(&id).await?;
-                let secrets = self.credentials(&profile, args.get(1)).await?;
-                if self.quitting.load(Ordering::SeqCst) {
-                    return Err("应用正在关闭".into());
-                }
-                let device = Arc::new(Device {
-                    id: id.clone(),
-                    profile: Mutex::new(profile),
-                    secrets: Mutex::new(secrets),
-                    desired: AtomicBool::new(true),
-                    cancel: CancellationToken::new(),
-                    trust: Mutex::new(None),
-                    connection: Mutex::new(None),
-                    monitor: Mutex::new(None),
-                    codex: Mutex::new(None),
-                    codex_generation: Mutex::new(0),
-                    task: Mutex::new(None),
-                });
-                self.devices
-                    .lock()
-                    .unwrap()
-                    .insert(id.clone(), device.clone());
-                self.status(&id, "connecting", None);
-                let owner = self.clone();
-                let worker = device.clone();
-                *device.task.lock().unwrap() = Some(tokio::spawn(async move {
-                    owner.run_device(worker).await;
-                }));
+                self.start_connection(&id, args.get(1)).await?;
             }
-            "disconnect" => self.disconnect(&id).await?,
+            "disconnect" => {
+                let remembered = self.forget_connection(&id).await;
+                // A disk error must not leave a live SSH connection open when
+                // the user explicitly asks to disconnect it.
+                self.disconnect(&id).await?;
+                remembered?;
+            }
             "delete-profile" => {
+                self.forget_connection(&id).await?;
                 self.disconnect(&id).await?;
                 self.terminals.remove_profile(&id).await;
                 self.store.lock().await.as_mut().unwrap().remove(&id)?;

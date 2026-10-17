@@ -1,6 +1,6 @@
 {
   "name": "lion-ssh",
-  "version": "1.9.2",
+  "version": "1.9.3",
   "description": "SSH connections, tunnels and server monitoring in one desktop workspace",
   "author": "Lion SSH contributors",
   "private": true,
@@ -13,8 +13,9 @@
     "prepare:licenses": "node scripts/licenses.cjs",
     "tauri": "node scripts/tauri.cjs",
     "test": "node scripts/test.cjs",
-    "test:ui": "npm run build:frontend && node scripts/slurm-ui-smoke.cjs && node scripts/ui-actions-smoke.cjs && node scripts/codex-ui-smoke.cjs && node scripts/terminal-ui-smoke.cjs && node scripts/language-ui-smoke.cjs",
+    "test:ui": "npm run build:frontend && node scripts/gpu-ui-smoke.cjs && node scripts/slurm-ui-smoke.cjs && node scripts/ui-actions-smoke.cjs && node scripts/codex-ui-smoke.cjs && node scripts/terminal-ui-smoke.cjs && node scripts/language-ui-smoke.cjs",
     "smoke": "node scripts/desktop-smoke.cjs",
+    "smoke:connections": "node scripts/connection-gpu-desktop-smoke.cjs",
     "smoke:data": "node scripts/data-directory-smoke.cjs",
     "pack": "node scripts/package.cjs --portable-only",
     "dist": "npm run dist:win",
