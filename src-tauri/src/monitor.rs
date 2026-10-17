@@ -1372,7 +1372,13 @@ impl Monitor {
             let mut state = self.slurm.lock().await;
             if state["scope"] != scope {
                 self.slurm_epoch.fetch_add(1, Ordering::SeqCst);
+                let available = state["availability"] == "available";
                 *state = blank_slurm(scope);
+                // A different queue scope does not invalidate the known Slurm
+                // capability. Keep the card mounted while replacing its rows.
+                if available {
+                    state["availability"] = json!("available");
+                }
                 state["status"] = json!("loading");
                 self.emit("slurm", &state);
                 self.tokens
@@ -1561,10 +1567,11 @@ impl Monitor {
             },
             Err(e) => Err(QueryError::new(e)),
         };
+        let mut state = self.slurm.lock().await;
+        // The scope may change while this response waits for the state lock.
         if self.cancel.is_cancelled() || epoch != self.slurm_epoch.load(Ordering::SeqCst) {
             return;
         }
-        let mut state = self.slurm.lock().await;
         match result {
             Ok(jobs) => {
                 let first = state["availability"] != "available";
@@ -2517,10 +2524,61 @@ mod tests {
         );
         monitor.initialize_slurm_scope("all").await.unwrap();
         assert_eq!(monitor.slurm.lock().await["scope"], "all");
+        assert_eq!(monitor.slurm.lock().await["availability"], "unknown");
         assert!(executor.commands.lock().await.is_empty());
         assert!(monitor.initialize_slurm_scope("invalid").await.is_err());
         monitor.refresh_slurm().await;
         assert_eq!(executor.commands.lock().await.as_slice(), &["squeue"]);
+    }
+    #[tokio::test]
+    async fn slurm_scope_change_retains_capability_but_clears_old_scope_results() {
+        let (monitor, executor) = harness().await;
+        let previous = monitor.slurm.lock().await.clone();
+        assert_eq!(previous["availability"], "available");
+        assert!(!previous["jobs"].as_array().unwrap().is_empty());
+        assert!(previous["lastUpdated"].is_u64());
+
+        monitor.initialize_slurm_scope("all").await.unwrap();
+
+        let state = monitor.slurm.lock().await;
+        assert_eq!(state["scope"], "all");
+        assert_eq!(state["availability"], "available");
+        assert_eq!(state["status"], "loading");
+        assert_eq!(state["jobs"], json!([]));
+        assert!(state["lastUpdated"].is_null());
+        assert!(state["nextPollAt"].is_null());
+        assert_eq!(executor.commands.lock().await.len(), 1);
+    }
+    #[tokio::test]
+    async fn slurm_response_waiting_for_state_lock_cannot_overwrite_new_scope() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let (monitor, executor) = harness().await;
+        let command_guard = executor.commands.lock().await;
+        let mut query = Box::pin(monitor.refresh_slurm());
+        let mut context = Context::from_waker(Waker::noop());
+        // Start the old-scope query and pause it at the executor's command log.
+        assert!(query.as_mut().poll(&mut context).is_pending());
+        let state_guard = monitor.slurm.lock().await;
+        assert_eq!(state_guard["status"], "loading");
+
+        // Queue the scope change first, then let the old response reach the
+        // state lock while its original epoch is still current.
+        let mut change_scope = Box::pin(monitor.initialize_slurm_scope("all"));
+        assert!(change_scope.as_mut().poll(&mut context).is_pending());
+        drop(command_guard);
+        assert!(query.as_mut().poll(&mut context).is_pending());
+        drop(state_guard);
+        change_scope.await.unwrap();
+        query.await;
+
+        let state = monitor.slurm.lock().await;
+        assert_eq!(state["scope"], "all");
+        assert_eq!(state["availability"], "available");
+        assert_eq!(state["status"], "loading");
+        assert_eq!(state["jobs"], json!([]));
+        assert!(state["lastUpdated"].is_null());
     }
     #[tokio::test]
     async fn cancellation_requires_one_use_confirmation_and_rechecks_uid() {

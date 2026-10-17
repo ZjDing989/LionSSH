@@ -306,7 +306,17 @@ const slurm = computed(() => currentState.value?.slurm);
 const showSlurmCard = computed(() => slurm.value?.availability === 'available');
 const slurmScope = computed(() => selected.value && pendingSlurmScopes[selected.value.id] || slurm.value?.scope || 'mine');
 const slurmLoading = computed(() => Boolean(selected.value && pendingSlurmScopes[selected.value.id]) || slurm.value?.status === 'loading');
-const slurmJobs = computed(() => slurmLoading.value ? [] : slurm.value?.jobs || []);
+// A refresh retains the completed result, including an empty queue. Only an
+// initial read or a new scope needs to replace the content with a placeholder.
+const slurmInitialLoading = computed(() => slurmLoading.value && !(slurm.value?.scope === slurmScope.value && slurm.value.lastUpdated));
+const slurmLoadingHeight = ref<number | null>(null);
+watch([slurmInitialLoading, selectedId], ([isLoading, id], [, previousId]) => {
+    slurmLoadingHeight.value = isLoading && id === previousId
+        ? slurmCardElement.value?.getBoundingClientRect().height ?? null : null;
+});
+const slurmMinimumHeight = computed(() => slurmCardHeight.value === null && slurmInitialLoading.value
+    ? Math.max(slurmMinHeight, slurmLoadingHeight.value || 0) : slurmMinHeight);
+const slurmJobs = computed(() => slurm.value?.scope === slurmScope.value ? slurm.value.jobs : []);
 const slurmPageCount = computed(() => Math.max(1, Math.ceil(slurmJobs.value.length / slurmPageSize)));
 const slurmPageRows = computed(() => slurmJobs.value.slice((slurmPage.value - 1) * slurmPageSize, slurmPage.value * slurmPageSize));
 watch([selectedId, slurmScope], () => { slurmPage.value = 1; });
@@ -314,7 +324,7 @@ watch([page, selectedId, connected], ([view, id, isConnected]) => {
     if (view === 'codex' && id && isConnected)
         void refreshCodex();
 });
-watch([() => slurm.value?.jobs.length || 0, slurmLoading], ([count, isLoading]) => {
+watch([() => slurmJobs.value.length, slurmLoading], ([count, isLoading]) => {
     if (!isLoading)
         slurmPage.value = Math.min(slurmPage.value, Math.max(1, Math.ceil(Number(count) / slurmPageSize)));
 });
@@ -1102,9 +1112,9 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
           <div class="storage-footer"><span><i v-if="storageLoading" class="status-dot pending" />{{ storageLoading ? t("正在统计空间占用\u2026") : connected ? t("每 {0} 分钟自动更新", { "0": Math.round((storage?.intervalSec || 300) / 60) }) : t("等待连接") }}</span><time v-if="storage?.lastUpdated">{{ t('更新于') }} {{ timeText(storage.lastUpdated) }}</time></div>
         </section>
 
-        <section v-if="showSlurmCard" :ref="element => slurmCardElement = element as HTMLElement | null" class="slurm-card card" :class="{ 'slurm-card-sized': slurmCardHeight !== null, 'slurm-card-resizing': slurmResizing }" :style="{ minHeight: `${slurmMinHeight}px`, height: slurmCardHeight !== null ? `${slurmCardHeight}px` : undefined }" data-testid="slurm-card" :aria-busy="slurmLoading">
+        <section v-if="showSlurmCard" :ref="element => slurmCardElement = element as HTMLElement | null" class="slurm-card card" :class="{ 'slurm-card-sized': slurmCardHeight !== null, 'slurm-card-resizing': slurmResizing }" :style="{ minHeight: `${slurmMinimumHeight}px`, height: slurmCardHeight !== null ? `${slurmCardHeight}px` : undefined }" data-testid="slurm-card" :aria-busy="slurmLoading">
           <div class="section-heading">
-            <div class="heading-label"><span class="section-icon blue"><Icon name="activity" :size="20" /></span><h2>{{ t('Slurm 作业') }}</h2><span class="count-tag">{{ slurmLoading ? '—' : slurmJobs.length }}</span></div>
+            <div class="heading-label"><span class="section-icon blue"><Icon name="activity" :size="20" /></span><h2>{{ t('Slurm 作业') }}</h2><span class="count-tag">{{ slurmInitialLoading ? '—' : slurmJobs.length }}</span></div>
             <div class="slurm-controls">
               <div class="slurm-scope" role="group" :aria-label="t('作业查看范围')">
                 <button data-testid="slurm-scope-mine" :class="{ active: slurmScope === 'mine' }" :aria-pressed="slurmScope === 'mine'" :disabled="!connected || busy[`slurmScope:${selected.id}`]" @click="changeSlurmScope('mine')">{{ t('个人') }}</button>
@@ -1114,11 +1124,11 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
             </div>
           </div>
           <div v-if="slurmWarning" class="slurm-warning" role="status"><Icon name="info" :size="15" /><span>{{ message(slurmWarning) }}</span></div>
-          <div v-if="slurmLoading" class="slurm-empty" data-testid="slurm-loading" role="status"><Icon name="refresh" :size="19" class="spinning" /><span>{{ t(slurmScope === 'mine' ? '正在读取个人作业…' : '正在读取全部作业…') }}</span></div>
+          <div v-if="slurmInitialLoading" class="slurm-empty" data-testid="slurm-loading" role="status"><Icon name="refresh" :size="19" class="spinning" /><span>{{ t(slurmScope === 'mine' ? '正在读取个人作业…' : '正在读取全部作业…') }}</span></div>
           <div v-else-if="slurmJobs.length" class="slurm-table-wrap" tabindex="0" role="region" :aria-label="t('Slurm 作业列表，可横向滚动')">
             <table class="slurm-table" data-testid="slurm-table">
               <thead><tr><th scope="col">{{ t('作业编号') }}</th><th scope="col">{{ t('分区') }}</th><th scope="col">{{ t('作业名称') }}</th><th scope="col">{{ t('用户') }}</th><th scope="col">{{ t('状态') }}</th><th scope="col">{{ t('已运行时间') }}</th><th scope="col">{{ t('节点数') }}</th><th scope="col">{{ t('节点列表') }}</th><th scope="col">{{ t('原因') }}</th><th scope="col">{{ t('权重') }}</th><th scope="col" class="align-right">{{ t('操作') }}</th></tr></thead>
-              <tbody><tr v-for="(job, index) in slurmPageRows" :key="`${job.cluster || ''}:${job.id}:${index}`">
+              <tbody><tr v-for="job in slurmPageRows" :key="`${job.cluster || ''}:${job.id}:${job.partition}`">
                 <td class="slurm-job-id"><span :title="job.id">{{ job.id }}</span><small v-if="job.cluster" :title="job.cluster">{{ job.cluster }}</small></td>
                 <td><span class="slurm-cell-text" :title="job.partition">{{ job.partition || '—' }}</span></td>
                 <td><span class="slurm-cell-text slurm-job-name" :title="job.name">{{ job.name || '—' }}</span></td>
@@ -1131,6 +1141,7 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
                 <td class="slurm-priority"><button v-if="priorities[priorityKey(job)]?.value !== undefined" class="text-button priority-value" :data-testid="`job-priority-${job.id}`" :title="priorities[priorityKey(job)]?.values?.length ? t('各作业权重：{0}；点击重新读取', { '0': priorities[priorityKey(job)]?.values?.join('、') }) : t('点击重新读取权重')" :disabled="!connected || busy[`priority:${priorityKey(job)}`]" @click="requestPriority(job)">{{ priorities[priorityKey(job)]?.value === null ? priorities[priorityKey(job)]?.values?.length ? t("多值") : '—' : priorities[priorityKey(job)]?.value?.toLocaleString() }}</button><button v-else class="text-button" :data-testid="`job-priority-query-${job.id}`" :title="message(priorities[priorityKey(job)]?.error) || t('读取该作业的调度权重')" :disabled="!connected || busy[`priority:${priorityKey(job)}`]" @click="requestPriority(job)">{{ busy[`priority:${priorityKey(job)}`] ? t("读取中") : priorities[priorityKey(job)]?.error ? t("重试") : t("查看") }}</button></td>
                 <td class="align-right"><button v-if="ownsJob(job)" class="icon-button danger-hover" :data-testid="`job-cancel-${job.id}`" :title="t('删除自己的作业 {0}', { '0': job.id })" :aria-label="t('删除自己的作业 {0}', { '0': job.id })" :disabled="!connected || busy[`prepareCancel:${priorityKey(job)}`] || busy.cancelJob" @click="requestJobCancellation(job)"><Icon :name="busy[`prepareCancel:${priorityKey(job)}`] ? 'refresh' : 'trash'" :size="16" :class="{ spinning: busy[`prepareCancel:${priorityKey(job)}`] }" /></button><span v-else class="slurm-no-action">—</span></td>
               </tr></tbody>
+              <tfoot v-if="slurmCardHeight !== null" class="slurm-grid-fill" aria-hidden="true"><tr><td v-for="column in 11" :key="column" /></tr></tfoot>
             </table>
           </div>
           <div v-else class="slurm-empty" data-testid="slurm-empty"><Icon :name="slurm?.error ? 'info' : 'check'" :size="19" /><span>{{ slurm?.error ? t("暂时无法读取作业") : slurmScope === 'mine' ? t("该用户暂无作业") : t("当前暂无可见作业") }}</span></div>

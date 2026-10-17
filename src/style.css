@@ -339,7 +339,7 @@ button { border: 0; }
 .gpu-metric-label { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 3px 8px; line-height: 1.5; }
 .gpu-metrics b { font-weight: 500; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .gpu-meter { height: 4px; border-radius: 3px; background: #e9eef5; overflow: hidden; margin-top: 5px; }
-.gpu-meter > span { display: block; height: 100%; border-radius: inherit; transition: width 1.5s cubic-bezier(.22, 1, .36, 1); }
+.gpu-meter > span { display: block; height: 100%; border-radius: inherit; transition: width .6s cubic-bezier(.4, 0, .2, 1); }
 .utilization-meter > span { background: #6b99df; }
 .memory-meter > span { background: #aa80cd; }
 .gpu-meter.unknown { background: repeating-linear-gradient(135deg, #e9eef5 0 4px, #dce3ed 4px 6px); }
@@ -366,6 +366,7 @@ button { border: 0; }
 .slurm-table-wrap { width: 100%; max-height: 340px; overflow: auto; overscroll-behavior: contain; }
 .slurm-table-wrap:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 .slurm-table { width: 100%; min-width: 1220px; border-collapse: separate; border-spacing: 0; table-layout: fixed; text-align: left; font-size: 12px; color: var(--text-secondary); }
+.slurm-card-sized .slurm-table { height: 100%; }
 .slurm-table th { position: sticky; top: 0; z-index: 1; padding: 11px 12px; background: var(--surface-soft); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--text-subtle); font-size: 11px; font-weight: 500; white-space: nowrap; }
 .slurm-table td { padding: 15px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; line-height: 1.7; }
 .slurm-table th:first-child, .slurm-table td:first-child { padding-left: 24px; }
@@ -380,11 +381,14 @@ button { border: 0; }
 .slurm-table :is(th, td):first-child { position: sticky; left: 0; border-right: 1px solid var(--line); }
 .slurm-table :is(th, td):nth-child(10) { position: sticky; right: 64px; border-left: 1px solid var(--line); }
 .slurm-table :is(th, td):last-child { position: sticky; right: 0; }
-.slurm-table tbody :is(td:first-child, td:nth-child(10), td:last-child) { z-index: 2; background: var(--slurm-sticky-surface); }
+.slurm-table :is(tbody, tfoot) :is(td:first-child, td:nth-child(10), td:last-child) { z-index: 2; background-color: var(--slurm-sticky-surface); }
 .slurm-table thead :is(th:first-child, th:nth-child(10), th:last-child) { z-index: 3; background: var(--surface-soft); }
 .slurm-table tbody tr:hover :is(td:first-child, td:nth-child(10), td:last-child) { background: var(--accent-soft); }
 .slurm-table tbody tr:last-child td { border-bottom: 0; }
 .slurm-table tbody tr:hover { background: var(--accent-soft); }
+/* Only the decorative blank area grows; real job rows keep their natural size. */
+.slurm-grid-fill { height: 100%; pointer-events: none; }
+.slurm-table .slurm-grid-fill td { padding: 0; border-bottom: 0; background-color: var(--slurm-sticky-surface); background-image: repeating-linear-gradient(to bottom, var(--line) 0 1px, transparent 1px 61px); }
 .slurm-job-id { color: var(--blue); font-variant-numeric: tabular-nums; }
 .slurm-job-id > span, .slurm-job-id > small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slurm-job-id > small { font-size: 10px; color: var(--text-subtle); margin-top: 3px; }
