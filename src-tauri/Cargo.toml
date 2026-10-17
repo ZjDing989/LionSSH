@@ -1,6 +1,6 @@
 [package]
 name = "lion-ssh"
-version = "1.9.3"
+version = "1.9.4"
 description = "Lion SSH desktop application and native SSH backend"
 authors = ["Lion SSH contributors"]
 license = "Apache-2.0"

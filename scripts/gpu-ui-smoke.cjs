@@ -115,6 +115,7 @@ async function main() {
       Object.assign(state.gpu.cards[7], { utilization: -5, memoryUsedMiB: -1 });
       send();
     });
+    await page.waitForFunction(() => [...document.querySelectorAll('.gpu-meter > span')].every(fill => fill.getAnimations().every(animation => animation.playState === 'finished')));
     await inspect(page, 'en', true);
     await page.evaluate(() => { window.__gpuUi.state.status = 'disconnected'; window.__gpuUi.send(); });
     assert.equal(await page.locator('.gpu-detail.idle').count(), 0, 'stale samples do not retain idle badge styling');
